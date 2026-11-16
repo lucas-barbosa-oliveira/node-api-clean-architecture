@@ -5,6 +5,7 @@ const port = Number(process.env.PORT ?? 3000)
 
 const container = await buildContainer()
 await container.recover() // pré-condição: antes de aceitar tráfego
+await container.ensureAdmin()
 
 const server = createApp(container).listen(port, () => {
     console.log(`API ouvindo em http://localhost:${port}`)

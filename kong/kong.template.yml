@@ -1,0 +1,87 @@
+# Configuração declarativa do Kong (modo DB-less).
+# Os placeholders (cifrão + chaves duplas) são preenchidos por scripts/setup.kong.ts, que gera kong/kong.yml.
+#
+# Divisão de responsabilidades:
+#   - Kong: autenticação genérica (assinatura e expiração do JWT), rate limit, limite de payload, correlation id.
+#   - API:  valida o token de novo (zero trust) e faz a autorização (escopos por rota e dono de cada recurso).
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: api
+    url: ${{ KONG_UPSTREAM_URL }}
+    connect_timeout: 5000
+    read_timeout: 30000
+    write_timeout: 30000
+    # só reenvia em falha de conexão; 1 tentativa evita duplicar POSTs em caso de timeout
+    retries: 1
+    routes:
+      # ---------- rotas públicas ----------
+      - name: health
+        paths: [/health]
+        methods: [GET]
+        strip_path: false
+
+      - name: jwks
+        paths: [/.well-known/jwks.json]
+        methods: [GET]
+        strip_path: false
+
+      - name: auth-login
+        paths: [/auth/login]
+        methods: [POST]
+        strip_path: false
+        plugins:
+          # freia tentativa de adivinhar senha
+          - name: rate-limiting
+            config:
+              minute: 10
+              hour: 100
+              limit_by: ip
+              policy: local
+
+      # ---------- rotas protegidas: exigem JWT válido ----------
+      - name: protected
+        paths: [/users, /clients, /jobs, /reports]
+        strip_path: false
+        plugins:
+          - name: jwt
+            config:
+              # o "iss" do token identifica a credencial (consumer abaixo) cuja chave pública valida a assinatura
+              key_claim_name: iss
+              claims_to_verify: [exp]
+              # tokens com validade maior que 24h são recusados
+              maximum_expiration: 86400
+              # token só no header Authorization (nunca em query string ou cookie, que vazam em logs)
+              header_names: [authorization]
+              uri_param_names: []
+              cookie_names: []
+          - name: rate-limiting
+            config:
+              minute: 300
+              limit_by: ip
+              policy: local
+
+# Quem emite os tokens é a própria API (POST /auth/login), assinando com a chave privada.
+# O Kong só conhece a chave pública: consegue validar, mas não emitir tokens.
+consumers:
+  - username: api-clean-architecture-auth
+    jwt_secrets:
+      - key: ${{ JWT_ISSUER }}
+        algorithm: RS256
+        rsa_public_key: |
+          ${{ JWT_PUBLIC_KEY }}
+
+# Plugins globais (todas as rotas)
+plugins:
+  # X-Request-ID em toda requisição (repassado à API e devolvido ao cliente) para rastrear logs
+  - name: correlation-id
+    config:
+      header_name: X-Request-ID
+      generator: uuid
+      echo_downstream: true
+
+  - name: request-size-limiting
+    config:
+      allowed_payload_size: 128
+      size_unit: kilobytes

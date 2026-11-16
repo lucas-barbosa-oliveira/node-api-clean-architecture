@@ -7,6 +7,8 @@ import { BullMqScheduler } from '../../src/background/scheduler/bullmq.scheduler
 import { BullMqJobQueue } from '../../src/infrastructure/queue/bullmq.job.queue.ts';
 import { RedisConnections } from '../../src/infrastructure/redis/redis.connections.ts';
 import { InMemoryJobRepository } from '../../src/infrastructure/repository/in-memory/in.memory.job.repository.ts';
+import { InMemoryUserRepository } from '../../src/infrastructure/repository/in-memory/in.memory.user.repository.ts';
+import { actorFor, actorOf, newUser } from '../helpers/fixtures.ts';
 import { waitUntil } from '../helpers/wait.until.ts';
 
 const redisUrl = process.env.REDIS_URL;
@@ -30,6 +32,17 @@ describe('BullMQ (requer Redis)', { skip: !redisUrl }, () => {
     await connections.close();
   });
 
+  const admin = actorFor('admin');
+  const manager = actorOf(newUser('manager'));
+  const client = newUser('client');
+  const report = { type: 'report.generate', clientId: client.id, payload: { month: '2026-10' } };
+
+  async function newService(repo: InMemoryJobRepository, queue: BullMqJobQueue) {
+    const users = new InMemoryUserRepository();
+    await users.save(client);
+    return new JobService(repo, queue, users);
+  }
+
   function newQueue(repo: InMemoryJobRepository, handlers: Record<string, JobHandler>, queueName: string) {
     return new BullMqJobQueue({
       repo,
@@ -43,10 +56,10 @@ describe('BullMQ (requer Redis)', { skip: !redisUrl }, () => {
   test('job processado pelo worker: pending → succeeded', async () => {
     const repo = new InMemoryJobRepository();
     const queue = newQueue(repo, { 'report.generate': async () => ({ rows: 5 }) }, newQueueName('ok'));
-    const service = new JobService(repo, queue);
+    const service = await newService(repo, queue);
     try {
-      const job = await service.submit('report.generate', { month: '2026-10' });
-      const done = await waitUntil(() => service.getById(job.id), j => j.status === 'succeeded' || j.status === 'failed');
+      const job = await service.submit(manager, report);
+      const done = await waitUntil(() => service.getById(admin, job.id), j => j.status === 'succeeded' || j.status === 'failed');
       assert.equal(done.status, 'succeeded');
       assert.deepEqual(done.result, { rows: 5 });
     } finally {
@@ -62,10 +75,10 @@ describe('BullMQ (requer Redis)', { skip: !redisUrl }, () => {
       { 'report.generate': async () => { calls++; throw new Error('boom'); } },
       newQueueName('fail'),
     );
-    const service = new JobService(repo, queue);
+    const service = await newService(repo, queue);
     try {
-      const job = await service.submit('report.generate', { month: '2026-10' });
-      const done = await waitUntil(() => service.getById(job.id), j => j.status === 'succeeded' || j.status === 'failed');
+      const job = await service.submit(manager, report);
+      const done = await waitUntil(() => service.getById(admin, job.id), j => j.status === 'succeeded' || j.status === 'failed');
       assert.equal(done.status, 'failed');
       assert.equal(done.error, 'boom');
       await sleep(200);
@@ -79,12 +92,12 @@ describe('BullMQ (requer Redis)', { skip: !redisUrl }, () => {
     const repo = new InMemoryJobRepository();
     let calls = 0;
     const queue = newQueue(repo, { 'report.generate': async () => { calls++; return null; } }, newQueueName('dedupe'));
-    const service = new JobService(repo, queue);
+    const service = await newService(repo, queue);
     try {
-      const job = await service.submit('report.generate', { month: '2026-10' });
+      const job = await service.submit(manager, report);
       await queue.enqueue(job.id);
       await queue.enqueue(job.id);
-      await waitUntil(() => service.getById(job.id), j => j.status === 'succeeded');
+      await waitUntil(() => service.getById(admin, job.id), j => j.status === 'succeeded');
       await sleep(300);
       assert.equal(calls, 1);
     } finally {
@@ -105,12 +118,12 @@ describe('BullMQ (requer Redis)', { skip: !redisUrl }, () => {
     };
     const instanceA = newQueue(repo, handlers, name);
     const instanceB = newQueue(repo, handlers, name);
-    const serviceA = new JobService(repo, instanceA);
+    const serviceA = await newService(repo, instanceA);
     try {
       const ids: string[] = [];
-      for (let i = 0; i < 8; i++) ids.push((await serviceA.submit('report.generate', { month: '2026-10' })).id);
+      for (let i = 0; i < 8; i++) ids.push((await serviceA.submit(manager, report)).id);
       for (const id of ids) {
-        await waitUntil(() => serviceA.getById(id), j => j.status === 'succeeded');
+        await waitUntil(() => serviceA.getById(admin, id), j => j.status === 'succeeded');
       }
       assert.equal(runs.size, 8);
       assert.ok([...runs.values()].every(count => count === 1));

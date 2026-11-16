@@ -8,6 +8,8 @@ export class UserMapper extends BaseMapper<User, IUserModel> {
             _id: user.id,
             name: user.name,
             email: user.email,
+            role: user.role,
+            passwordHash: user.passwordHash,
             createdAt: user.createdAt,
             updatedAt: user.updatedAt,
         }
@@ -18,6 +20,8 @@ export class UserMapper extends BaseMapper<User, IUserModel> {
             id: json._id,
             name: json.name,
             email: json.email,
+            role: json.role,
+            passwordHash: json.passwordHash,
             createdAt: new Date(json.createdAt),
             updatedAt: new Date(json.updatedAt),
         })

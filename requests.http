@@ -1,23 +1,80 @@
 ### Requisições de exemplo (VS Code: extensão "REST Client"; JetBrains: suporte nativo a .http)
-@host = http://localhost:3000
+# Pelo Kong (npm run docker:up + npm run dev:docker): porta 8000. Direto na API: troque para 3000.
+@host = http://localhost:8000
 
-### Saúde
+### Saúde (pública)
 GET {{host}}/health
 
-### Criar usuário
+### Login do administrador (credenciais de ADMIN_EMAIL/ADMIN_PASSWORD)
+# @name admin
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{ "email": "admin@exemplo.com", "password": "admin-local-123" }
+
+###
+@adminToken = {{admin.response.body.access_token}}
+
+### Admin cadastra um gestor
+# @name gestor
 POST {{host}}/users
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
-{ "name": "Ana Souza", "email": "ana@exemplo.com" }
+{ "name": "Gabi Gestora", "email": "gabi@exemplo.com", "password": "senha-gestora", "role": "manager" }
 
-### Buscar usuário (troque o id pelo retornado acima)
-GET {{host}}/users/COLE-O-ID-AQUI
+### Admin cadastra um cliente
+# @name cliente
+POST {{host}}/users
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
 
-### Disparar um relatório (responde 202 na hora; o trabalho segue em segundo plano)
+{ "name": "Caio Cliente", "email": "caio@exemplo.com", "password": "senha-cliente", "role": "client" }
+
+### Login do gestor
+# @name loginGestor
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{ "email": "gabi@exemplo.com", "password": "senha-gestora" }
+
+### Login do cliente
+# @name loginCliente
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{ "email": "caio@exemplo.com", "password": "senha-cliente" }
+
+###
+@gestorToken = {{loginGestor.response.body.access_token}}
+@clienteToken = {{loginCliente.response.body.access_token}}
+
+### Gestor lista os clientes disponíveis
+GET {{host}}/clients
+Authorization: Bearer {{gestorToken}}
+
+### Gestor cria um job (relatório) para o cliente: responde 202 na hora
+# @name job
 POST {{host}}/reports
+Authorization: Bearer {{gestorToken}}
 Content-Type: application/json
 
-{ "month": "2026-10" }
+{ "clientId": "{{cliente.response.body.id}}", "month": "2026-10" }
 
-### Consultar o job (troque o id pelo retornado acima): pending -> running -> succeeded
-GET {{host}}/jobs/COLE-O-ID-AQUI
+### Cliente consulta o job associado a ele: pending -> running -> succeeded
+GET {{host}}/jobs/{{job.response.body.id}}
+Authorization: Bearer {{clienteToken}}
+
+### Cliente lista os próprios jobs
+GET {{host}}/jobs
+Authorization: Bearer {{clienteToken}}
+
+### Dados do usuário logado
+GET {{host}}/users/me
+Authorization: Bearer {{clienteToken}}
+
+### Sem token: 401 (barrado pelo Kong)
+GET {{host}}/jobs
+
+### Chaves públicas para validar os tokens (JWKS)
+GET {{host}}/.well-known/jwks.json

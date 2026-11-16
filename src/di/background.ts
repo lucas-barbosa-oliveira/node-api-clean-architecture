@@ -1,5 +1,6 @@
 import type { JobHandler } from '../application/port/job.handler.ts'
 import type { IJobRepository } from '../application/port/job.repository.ts'
+import type { IUserRepository } from '../application/port/user.repository.ts'
 import { JobService } from '../application/service/job.service.ts'
 import { InProcessScheduler } from '../background/scheduler/in.process.scheduler.ts'
 import type { BackgroundTask, ITaskScheduler } from '../background/task.ts'
@@ -19,6 +20,7 @@ export async function buildBackground(
     env: Env,
     deps: {
     jobRepository: IJobRepository;
+    userRepository: IUserRepository;
     handlers: Record<string, JobHandler>;
     makeTasks: (jobService: JobService) => BackgroundTask[];
   },
@@ -35,7 +37,7 @@ export async function buildBackground(
             queueConnection: redis.forQueue(),
             workerConnection: redis.forWorker(),
         })
-        const jobService = new JobService(deps.jobRepository, queue)
+        const jobService = new JobService(deps.jobRepository, queue, deps.userRepository)
         const scheduler = new BullMqScheduler({
             tasks: deps.makeTasks(jobService),
             queueConnection: redis.forQueue(),
@@ -54,7 +56,7 @@ export async function buildBackground(
     }
 
     const queue = new InProcessJobQueue(deps.jobRepository, deps.handlers)
-    const jobService = new JobService(deps.jobRepository, queue)
+    const jobService = new JobService(deps.jobRepository, queue, deps.userRepository)
     const scheduler = new InProcessScheduler(deps.makeTasks(jobService))
     return {
         jobService,

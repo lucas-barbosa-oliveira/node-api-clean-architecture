@@ -1,5 +1,5 @@
-# Dependências para rodar a API em modo "completo" (Mongo + Redis).
-# Uso:  npm run docker:up   (ou: docker compose up -d --wait)
+# Dependências para rodar a API em modo "completo" (Mongo + Redis + Kong Gateway).
+# Uso:  npm run docker:up   (gera kong/kong.yml e as chaves JWT, depois: docker compose up -d --wait)
 # Parar: npm run docker:down (ou: docker compose down; adicione -v para apagar os dados)
 name: api-clean-architecture
 
@@ -30,6 +30,33 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  # API Gateway na frente da API: valida o JWT, aplica rate limit e limite de payload.
+  # A API roda fora do Docker (npm run dev:docker); o Kong a alcança em host.docker.internal:3000.
+  kong:
+    image: kong:3.9
+    environment:
+      KONG_DATABASE: "off" # modo DB-less: toda a configuração vem do arquivo declarativo
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+    volumes:
+      - ./kong/kong.yml:/kong/kong.yml:ro # gerado por npm run kong:setup
+    ports:
+      - "127.0.0.1:8000:8000" # proxy: é por aqui que os clientes acessam a API
+      - "127.0.0.1:8001:8001" # Admin API (somente leitura no modo DB-less); nunca exponha publicamente
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # permite ao container alcançar a API rodando no host (Linux)
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
 volumes:
   mongo-data:

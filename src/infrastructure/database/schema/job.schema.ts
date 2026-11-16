@@ -4,6 +4,8 @@ import { JOB_STATUSES, type JobStatus } from '../../../domain/model/job.ts'
 export interface IJobModel {
   _id: string;
   type: string;
+  managerId: string;
+  clientId: string;
   status: JobStatus;
   payload: unknown;
   result?: unknown;
@@ -18,6 +20,8 @@ export const jobSchema = new mongoose.Schema<IJobModel>(
     {
         _id: { type: String, required: true },
         type: { type: String, required: true },
+        managerId: { type: String, required: true },
+        clientId: { type: String, required: true },
         status: { type: String, required: true, enum: JOB_STATUSES },
         payload: { type: mongoose.Schema.Types.Mixed },
         result: { type: mongoose.Schema.Types.Mixed },
@@ -32,3 +36,6 @@ export const jobSchema = new mongoose.Schema<IJobModel>(
 )
 
 jobSchema.index({ status: 1 })
+// listagens por participante, mais recentes primeiro
+jobSchema.index({ managerId: 1, createdAt: -1 })
+jobSchema.index({ clientId: 1, createdAt: -1 })

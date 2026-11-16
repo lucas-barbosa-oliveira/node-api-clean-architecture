@@ -7,6 +7,10 @@ node_modules/
 !.env.example
 !.env.docker
 
+# Chaves dos JWTs (geradas por npm run kong:setup) e configuração do Kong gerada a partir do template
+keys/
+kong/kong.yml
+
 # Build e cobertura
 dist/
 coverage/

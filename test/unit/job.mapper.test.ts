@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Job } from '../../src/domain/model/job.ts';
-import { User } from '../../src/domain/model/user.ts';
 import { JobMapper } from '../../src/infrastructure/mapper/job.mapper.ts';
 import { UserMapper } from '../../src/infrastructure/mapper/user.mapper.ts';
+import { newUser } from '../helpers/fixtures.ts';
 
 test('transform converte model → documento → model', () => {
   const mapper = new JobMapper();
-  const job = Job.create('report.generate', { month: '2026-10' });
+  const job = Job.create({ type: 'report.generate', payload: { month: '2026-10' }, managerId: 'gestor-1', clientId: 'cliente-1' });
 
   const doc = mapper.transform(job);
   assert.equal(doc._id, job.id);
@@ -19,7 +19,7 @@ test('transform converte model → documento → model', () => {
 
 test('transform aceita documento que passou por JSON (datas viram string)', () => {
   const mapper = new JobMapper();
-  const job = Job.create('report.generate', { month: '2026-10' });
+  const job = Job.create({ type: 'report.generate', payload: { month: '2026-10' }, managerId: 'gestor-1', clientId: 'cliente-1' });
   job.start();
   job.succeed({ rows: 3 });
 
@@ -35,7 +35,7 @@ test('transform trata null e listas', () => {
   assert.equal(mapper.transform(null), null);
   assert.equal(mapper.transform(undefined), null);
 
-  const users = [User.create({ name: 'Ana', email: 'a@x.com' }), User.create({ name: 'Bia', email: 'b@x.com' })];
+  const users = [newUser('manager'), newUser('client')];
   const docs = mapper.transform(users);
   assert.equal(docs.length, 2);
   assert.deepEqual(mapper.transform(docs), users);

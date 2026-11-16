@@ -6,6 +6,10 @@ export type JobStatus = (typeof JOB_STATUSES)[number]
 export type JobProps = EntityProps & {
   type: string;
   payload: unknown;
+  /** Gestor que cadastrou o job. */
+  managerId: string;
+  /** Cliente ao qual o job está associado. */
+  clientId: string;
   status?: JobStatus;
   result?: unknown;
   error?: string;
@@ -16,6 +20,8 @@ export type JobProps = EntityProps & {
 export class Job extends Entity {
     public readonly type: string
     public readonly payload: unknown
+    public readonly managerId: string
+    public readonly clientId: string
     public status: JobStatus
     public result?: unknown
     public error?: string
@@ -26,6 +32,8 @@ export class Job extends Entity {
         super(props)
         this.type = props.type
         this.payload = props.payload
+        this.managerId = props.managerId
+        this.clientId = props.clientId
         this.status = props.status ?? 'pending'
         this.result = props.result
         this.error = props.error
@@ -33,8 +41,13 @@ export class Job extends Entity {
         this.finishedAt = props.finishedAt
     }
 
-    public static create(type: string, payload: unknown): Job {
-        return new Job({ type, payload })
+    public static create(data: { type: string; payload: unknown; managerId: string; clientId: string }): Job {
+        return new Job(data)
+    }
+
+    /** O usuário participa do job (é o gestor que o criou ou o cliente associado). */
+    public involves(userId: string): boolean {
+        return this.managerId === userId || this.clientId === userId
     }
 
     public start(): void {

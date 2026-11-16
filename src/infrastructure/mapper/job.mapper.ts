@@ -10,6 +10,8 @@ export class JobMapper extends BaseMapper<Job, IJobModel> {
         return {
             _id: job.id,
             type: job.type,
+            managerId: job.managerId,
+            clientId: job.clientId,
             status: job.status,
             payload: job.payload,
             result: job.result,
@@ -25,6 +27,8 @@ export class JobMapper extends BaseMapper<Job, IJobModel> {
         return new Job({
             id: json._id,
             type: json.type,
+            managerId: json.managerId,
+            clientId: json.clientId,
             status: json.status,
             payload: json.payload,
             result: json.result,

@@ -28,3 +28,17 @@ export class NotFoundError extends AppError {
         super('NOT_FOUND', message)
     }
 }
+
+/** Sem credencial válida (token ausente, inválido ou expirado; login com senha errada). */
+export class UnauthorizedError extends AppError {
+    constructor(message = 'Não autenticado') {
+        super('UNAUTHORIZED', message)
+    }
+}
+
+/** Autenticado, mas sem permissão (escopo) para a operação. */
+export class ForbiddenError extends AppError {
+    constructor(message = 'Acesso negado') {
+        super('FORBIDDEN', message)
+    }
+}

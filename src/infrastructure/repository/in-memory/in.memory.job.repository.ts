@@ -1,4 +1,4 @@
-import type { IJobRepository } from '../../../application/port/job.repository.ts'
+import { JOB_LIST_LIMIT, type IJobRepository } from '../../../application/port/job.repository.ts'
 import type { Job, JobStatus } from '../../../domain/model/job.ts'
 import type { IJobModel } from '../../database/schema/index.ts'
 import { JobMapper } from '../../mapper/job.mapper.ts'
@@ -21,6 +21,14 @@ export class InMemoryJobRepository implements IJobRepository {
         return this.#mapper.transform(docs.map(item => structuredClone(item)))
     }
 
+    public async findAll(): Promise<Job[]> {
+        return this.#newestFirst([...this.#docs.values()])
+    }
+
+    public async findByParticipant(userId: string): Promise<Job[]> {
+        return this.#newestFirst([...this.#docs.values()].filter(item => item.managerId === userId || item.clientId === userId))
+    }
+
     public async deleteFinishedBefore(date: Date): Promise<number> {
         let count = 0
         for (const [id, doc] of this.#docs) {
@@ -30,5 +38,10 @@ export class InMemoryJobRepository implements IJobRepository {
             }
         }
         return count
+    }
+
+    #newestFirst(docs: IJobModel[]): Job[] {
+        const sorted = docs.toSorted((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, JOB_LIST_LIMIT)
+        return this.#mapper.transform(sorted.map(item => structuredClone(item)))
     }
 }

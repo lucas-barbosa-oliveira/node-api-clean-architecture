@@ -1,7 +1,7 @@
 {
   "name": "api-clean-architecture",
   "version": "1.0.0",
-  "description": "API Node.js com Express 5, TypeScript nativo e Clean Architecture (Mongo, Redis/BullMQ, jobs em segundo plano)",
+  "description": "API Node.js com Express 5, TypeScript nativo e Clean Architecture (Mongo, Redis/BullMQ, jobs em segundo plano, JWT + Kong Gateway)",
   "private": true,
   "type": "module",
   "engines": {
@@ -15,7 +15,8 @@
     "test": "node --test \"test/**/*.test.ts\"",
     "test:docker": "node --env-file=.env.docker --test \"test/**/*.test.ts\"",
     "typecheck": "node ./node_modules/typescript7/bin/tsc --noEmit",
-    "docker:up": "docker compose up -d --wait",
+    "kong:setup": "node --env-file-if-exists=.env.docker scripts/setup.kong.ts",
+    "docker:up": "npm run kong:setup && docker compose up -d --wait",
     "docker:down": "docker compose down",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix"
@@ -26,6 +27,7 @@
     "croner": "^11.0.1",
     "express": "^5.3.0",
     "ioredis": "^6.0.0",
+    "jose": "^6.2.17",
     "mongoose": "^9.12.2",
     "zod": "^4.6.7"
   },
