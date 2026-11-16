@@ -1,0 +1,47 @@
+{
+  "name": "api-clean-architecture",
+  "version": "1.0.0",
+  "description": "API Node.js com Express 5, TypeScript nativo e Clean Architecture (Mongo, Redis/BullMQ, jobs em segundo plano)",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "node --watch --env-file-if-exists=.env src/main/server.ts",
+    "dev:docker": "node --watch --env-file=.env.docker src/main/server.ts",
+    "start": "node --env-file-if-exists=.env src/main/server.ts",
+    "start:docker": "node --env-file=.env.docker src/main/server.ts",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "test:docker": "node --env-file=.env.docker --test \"test/**/*.test.ts\"",
+    "typecheck": "node ./node_modules/typescript7/bin/tsc --noEmit",
+    "docker:up": "docker compose up -d --wait",
+    "docker:down": "docker compose down",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "bullmq": "^6.7.6",
+    "croner": "^11.0.1",
+    "express": "^5.3.0",
+    "ioredis": "^6.0.0",
+    "mongoose": "^9.12.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.7",
+    "@eslint/js": "^10.0.1",
+    "@stylistic/eslint-plugin": "^6.0.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "@types/supertest": "^7.2.1",
+    "@typescript-eslint/eslint-plugin": "^8.73.0",
+    "@typescript-eslint/parser": "^8.73.0",
+    "eslint": "^10.15.0",
+    "globals": "^17.14.0",
+    "supertest": "^7.3.2",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript7": "npm:typescript@^7.0.2"
+  }
+}

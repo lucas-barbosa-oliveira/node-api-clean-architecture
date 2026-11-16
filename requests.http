@@ -1,0 +1,23 @@
+### Requisições de exemplo (VS Code: extensão "REST Client"; JetBrains: suporte nativo a .http)
+@host = http://localhost:3000
+
+### Saúde
+GET {{host}}/health
+
+### Criar usuário
+POST {{host}}/users
+Content-Type: application/json
+
+{ "name": "Ana Souza", "email": "ana@exemplo.com" }
+
+### Buscar usuário (troque o id pelo retornado acima)
+GET {{host}}/users/COLE-O-ID-AQUI
+
+### Disparar um relatório (responde 202 na hora; o trabalho segue em segundo plano)
+POST {{host}}/reports
+Content-Type: application/json
+
+{ "month": "2026-10" }
+
+### Consultar o job (troque o id pelo retornado acima): pending -> running -> succeeded
+GET {{host}}/jobs/COLE-O-ID-AQUI

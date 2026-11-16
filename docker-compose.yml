@@ -1,0 +1,36 @@
+# Dependências para rodar a API em modo "completo" (Mongo + Redis).
+# Uso:  npm run docker:up   (ou: docker compose up -d --wait)
+# Parar: npm run docker:down (ou: docker compose down; adicione -v para apagar os dados)
+name: api-clean-architecture
+
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "127.0.0.1:27017:27017" # só acessível da sua máquina (sem autenticação: uso local)
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    # appendonly: persiste os dados em disco; noeviction: o Redis nunca descarta chaves da fila (recomendado pelo BullMQ)
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  mongo-data:
+  redis-data:

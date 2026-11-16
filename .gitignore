@@ -1,0 +1,31 @@
+# Dependências
+node_modules/
+
+# Variáveis de ambiente (mantém apenas os modelos sem segredos)
+.env
+.env.*
+!.env.example
+!.env.docker
+
+# Build e cobertura
+dist/
+coverage/
+*.tsbuildinfo
+
+# Caches de ferramentas
+.eslintcache
+.npm/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Editores e sistema operacional
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
