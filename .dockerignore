@@ -1,0 +1,26 @@
+# Só entra na imagem o necessário para rodar: package*.json e src/.
+node_modules
+npm-debug.log*
+.git
+.gitignore
+.vscode
+.idea
+
+# segredos e configurações locais: chegam ao container por variáveis de ambiente e volumes, nunca pela imagem
+.env
+.env.*
+keys
+
+# não usados em produção
+test
+scripts
+kong
+coverage
+dist
+README.md
+requests.http
+eslint.config.mjs
+tsconfig*.json
+docker-compose*.yml
+Dockerfile
+.dockerignore

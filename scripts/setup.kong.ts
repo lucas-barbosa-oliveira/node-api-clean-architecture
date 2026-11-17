@@ -3,7 +3,8 @@
  *  1. gera o par de chaves RSA dos JWTs (se ainda não existir);
  *  2. gera kong/kong.yml a partir de kong/kong.template.yml, com a chave pública e o emissor.
  *
- * Uso: npm run kong:setup (lê .env.docker). Rodado automaticamente por npm run docker:up.
+ * Uso: npm run kong:setup (lê .env.docker). Rodado automaticamente por npm run docker:up e docker:infra.
+ * KONG_UPSTREAM_URL: onde o Kong encontra a API (padrão: o container "api"; docker:infra usa o host).
  * Depois de trocar as chaves ou o template: npm run kong:setup && docker compose restart kong
  */
 import { generateKeyPairSync } from 'node:crypto'
@@ -14,7 +15,7 @@ import { dirname } from 'node:path'
 const privateKeyPath = process.env.JWT_PRIVATE_KEY_PATH ?? './keys/jwt.private.pem'
 const publicKeyPath = process.env.JWT_PUBLIC_KEY_PATH ?? './keys/jwt.public.pem'
 const issuer = process.env.JWT_ISSUER ?? 'api-clean-architecture'
-const upstreamUrl = process.env.KONG_UPSTREAM_URL ?? 'http://host.docker.internal:3000'
+const upstreamUrl = process.env.KONG_UPSTREAM_URL ?? 'http://api:3000'
 
 const TEMPLATE = 'kong/kong.template.yml'
 const OUTPUT = 'kong/kong.yml'

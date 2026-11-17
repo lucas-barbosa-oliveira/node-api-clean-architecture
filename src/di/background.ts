@@ -1,3 +1,4 @@
+import type { ILogger } from '../application/port/logger.ts'
 import type { JobHandler } from '../application/port/job.handler.ts'
 import type { IJobRepository } from '../application/port/job.repository.ts'
 import type { IUserRepository } from '../application/port/user.repository.ts'
@@ -23,6 +24,7 @@ export async function buildBackground(
     userRepository: IUserRepository;
     handlers: Record<string, JobHandler>;
     makeTasks: (jobService: JobService) => BackgroundTask[];
+    logger: ILogger;
   },
 ): Promise<Background> {
     if (env.QUEUE_DRIVER === 'redis') {
@@ -30,19 +32,22 @@ export async function buildBackground(
         const { BullMqJobQueue } = await import('../infrastructure/queue/bullmq.job.queue.ts')
         const { BullMqScheduler } = await import('../background/scheduler/bullmq.scheduler.ts')
 
-        const redis = new RedisConnections(env.REDIS_URL)
+        const redis = new RedisConnections(env.REDIS_URL, deps.logger.child('redis'))
         const queue = new BullMqJobQueue({
             repo: deps.jobRepository,
             handlers: deps.handlers,
-            queueConnection: redis.forQueue(),
-            workerConnection: redis.forWorker(),
+            queueConnection: redis.forQueue('jobs:queue'),
+            workerConnection: redis.forWorker('jobs:worker'),
+            logger: deps.logger.child('jobs'),
         })
         const jobService = new JobService(deps.jobRepository, queue, deps.userRepository)
         const scheduler = new BullMqScheduler({
             tasks: deps.makeTasks(jobService),
-            queueConnection: redis.forQueue(),
-            workerConnection: redis.forWorker(),
+            queueConnection: redis.forQueue('tasks:queue'),
+            workerConnection: redis.forWorker('tasks:worker'),
+            logger: deps.logger.child('scheduler'),
         })
+        await redis.ready()
         return {
             jobService,
             scheduler,
@@ -55,9 +60,10 @@ export async function buildBackground(
         }
     }
 
-    const queue = new InProcessJobQueue(deps.jobRepository, deps.handlers)
+    const queue = new InProcessJobQueue(deps.jobRepository, deps.handlers, 2, deps.logger.child('jobs'))
+    deps.logger.child('jobs').info('Fila de jobs em processo configurada (memória, concorrência 2)')
     const jobService = new JobService(deps.jobRepository, queue, deps.userRepository)
-    const scheduler = new InProcessScheduler(deps.makeTasks(jobService))
+    const scheduler = new InProcessScheduler(deps.makeTasks(jobService), undefined, deps.logger.child('scheduler'))
     return {
         jobService,
         scheduler,

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import type { ITokenService, IssuedToken } from '../../application/port/token.service.ts'
 import type { Actor } from '../../domain/auth/actor.ts'
 import { UnauthorizedError } from '../../domain/error/index.ts'
-import { USER_ROLES, type UserRole } from '../../domain/model/user.ts'
+import { PRINCIPAL_ROLES, type PrincipalRole } from '../../domain/auth/scopes.ts'
 import type { SigningKeys } from './signing.keys.ts'
 
 const ALGORITHM = 'RS256'
@@ -25,10 +25,17 @@ export class JwtTokenService implements ITokenService {
         this.#config = config
     }
 
-    public async issue(actor: Actor): Promise<IssuedToken> {
-        const { privateKey, issuer, audience, expiresInSeconds } = this.#config
+    public async issue(actor: Actor, options: { expiresInSeconds?: number } = {}): Promise<IssuedToken> {
+        const { privateKey, issuer, audience } = this.#config
+        const expiresInSeconds = options.expiresInSeconds ?? this.#config.expiresInSeconds
         const now = Math.floor(Date.now() / 1000)
-        const accessToken = await new SignJWT({ role: actor.role, scope: actor.scopes.join(' ') })
+        const claims = {
+            role: actor.role,
+            scope: actor.scopes.join(' '),
+            ...(actor.sessionId && { sid: actor.sessionId }),
+            ...(actor.clientId && { cid: actor.clientId }),
+        }
+        const accessToken = await new SignJWT(claims)
             .setProtectedHeader({ alg: ALGORITHM, typ: 'JWT', kid: await this.#keyId() })
             .setSubject(actor.userId)
             .setIssuer(issuer)
@@ -48,11 +55,17 @@ export class JwtTokenService implements ITokenService {
         } catch {
             throw new UnauthorizedError('Token inválido ou expirado')
         }
-        const { sub, role, scope } = payload
-        if (typeof sub !== 'string' || typeof scope !== 'string' || !USER_ROLES.includes(role as UserRole)) {
+        const { sub, role, scope, sid, cid } = payload
+        if (typeof sub !== 'string' || typeof scope !== 'string' || !PRINCIPAL_ROLES.includes(role as PrincipalRole)) {
             throw new UnauthorizedError('Token inválido ou expirado')
         }
-        return { userId: sub, role: role as UserRole, scopes: scope.split(' ').filter(Boolean) }
+        return {
+            userId: sub,
+            role: role as PrincipalRole,
+            scopes: scope.split(' ').filter(Boolean),
+            ...(typeof sid === 'string' && { sessionId: sid }),
+            ...(typeof cid === 'string' && { clientId: cid }),
+        }
     }
 
     public async publicJwks(): Promise<{ keys: object[] }> {

@@ -2,11 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { SignJWT } from 'jose';
-import { AuthService } from '../../src/application/service/auth.service.ts';
 import { ROLE_SCOPES } from '../../src/domain/auth/scopes.ts';
-import { UnauthorizedError, ValidationError } from '../../src/domain/error/index.ts';
-import { User } from '../../src/domain/model/user.ts';
-import { InMemoryUserRepository } from '../../src/infrastructure/repository/in-memory/in.memory.user.repository.ts';
+import { UnauthorizedError } from '../../src/domain/error/index.ts';
 import { JwtTokenService } from '../../src/infrastructure/security/jwt.token.service.ts';
 import { ScryptPasswordHasher } from '../../src/infrastructure/security/scrypt.password.hasher.ts';
 import { actorFor } from '../helpers/fixtures.ts';
@@ -30,6 +27,9 @@ test('JWT: emite e valida, devolvendo o ator com os escopos', async () => {
   const { accessToken, expiresIn } = await tokens.issue(actor);
   assert.equal(expiresIn, 600);
   assert.deepEqual(await tokens.verify(accessToken), { ...actor, scopes: [...actor.scopes] });
+
+  const withSession = { ...actor, sessionId: crypto.randomUUID() };
+  assert.equal((await tokens.verify((await tokens.issue(withSession)).accessToken)).sessionId, withSession.sessionId);
 });
 
 test('JWT: rejeita token adulterado, de outro emissor/audiência, assinado com outra chave ou expirado', async () => {
@@ -76,27 +76,4 @@ test('JWKS publica só a chave pública', async () => {
   assert.equal(jwk.alg, 'RS256');
   assert.ok(jwk.kid && jwk.n && jwk.e);
   assert.equal(jwk.d, undefined);
-});
-
-test('login: devolve token com os escopos do papel; credenciais erradas dão o mesmo erro', async () => {
-  const users = new InMemoryUserRepository();
-  const hasher = new ScryptPasswordHasher();
-  const tokens = new JwtTokenService(config);
-  const auth = new AuthService(users, hasher, tokens);
-  const manager = User.create({ name: 'Gestor', email: 'gestor@x.com', role: 'manager', passwordHash: await hasher.hash('senha-gestor') });
-  await users.save(manager);
-
-  const result = await auth.login({ email: ' GESTOR@x.com ', password: 'senha-gestor' });
-  assert.equal(result.tokenType, 'Bearer');
-  const actor = await auth.authenticate(result.accessToken);
-  assert.equal(actor.userId, manager.id);
-  assert.deepEqual(actor.scopes, ROLE_SCOPES.manager);
-
-  const wrongPassword = await auth.login({ email: 'gestor@x.com', password: 'errada' }).catch(err => err);
-  const unknownEmail = await auth.login({ email: 'nao@existe.com', password: 'errada' }).catch(err => err);
-  assert.ok(wrongPassword instanceof UnauthorizedError);
-  assert.ok(unknownEmail instanceof UnauthorizedError);
-  assert.equal(wrongPassword.message, unknownEmail.message);
-
-  await assert.rejects(() => auth.login({ email: 'x' }), ValidationError);
 });

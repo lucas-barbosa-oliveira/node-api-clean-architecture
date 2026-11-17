@@ -4,7 +4,7 @@ import { JobService } from '../../src/application/service/job.service.ts';
 import { NotFoundError, ValidationError } from '../../src/domain/error/index.ts';
 import { InMemoryJobRepository } from '../../src/infrastructure/repository/in-memory/in.memory.job.repository.ts';
 import { InMemoryUserRepository } from '../../src/infrastructure/repository/in-memory/in.memory.user.repository.ts';
-import { actorFor, actorOf, newUser } from '../helpers/fixtures.ts';
+import { actorFor, actorOf, listQuery, newUser } from '../helpers/fixtures.ts';
 
 // regras de acesso: a fila não importa aqui
 const noopQueue = { enqueue: async () => {}, close: async () => {} };
@@ -49,10 +49,20 @@ test('list: cada um vê só os jobs em que participa; admin vê todos', async ()
   const a2 = await service.submit(actorOf(managerA), { ...report, clientId: clientB.id });
   const b1 = await service.submit(actorOf(managerB), { ...report, clientId: clientA.id });
 
-  const ids = async (actor: Parameters<JobService['list']>[0]) => (await service.list(actor)).map(job => job.id).sort();
+  const ids = async (actor: Parameters<JobService['list']>[0]) => (await service.list(actor, listQuery())).items.map(job => job.id).sort();
   assert.deepEqual(await ids(actorOf(managerA)), [a1.id, a2.id].sort());
   assert.deepEqual(await ids(actorOf(managerB)), [b1.id]);
   assert.deepEqual(await ids(actorOf(clientA)), [a1.id, b1.id].sort());
   assert.deepEqual(await ids(actorOf(clientB)), [a2.id]);
   assert.deepEqual(await ids(actorFor('admin')), [a1.id, a2.id, b1.id].sort());
+});
+
+test('list: filtros da query string não ampliam o acesso (são combinados com $and)', async () => {
+  const { service, managerA, managerB, clientA, report } = await setup();
+  await service.submit(actorOf(managerA), { ...report, clientId: clientA.id });
+  // gestor B tenta pedir os jobs do gestor A pelo filtro
+  const page = await service.list(actorOf(managerB), listQuery({ filter: { managerId: managerA.id } }));
+  assert.equal(page.total, 0);
+  const orTrick = await service.list(actorOf(managerB), listQuery({ filter: { $or: [{ managerId: managerA.id }] } }));
+  assert.equal(orTrick.total, 0);
 });

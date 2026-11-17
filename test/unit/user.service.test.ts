@@ -4,7 +4,7 @@ import { UserService } from '../../src/application/service/user.service.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../../src/domain/error/index.ts';
 import { ScryptPasswordHasher } from '../../src/infrastructure/security/scrypt.password.hasher.ts';
 import { InMemoryUserRepository } from '../../src/infrastructure/repository/in-memory/in.memory.user.repository.ts';
-import { actorFor, actorOf } from '../helpers/fixtures.ts';
+import { actorFor, actorOf, listQuery } from '../helpers/fixtures.ts';
 
 const setup = () => {
   const repo = new InMemoryUserRepository();
@@ -47,13 +47,15 @@ test('listClients devolve apenas clientes', async () => {
   const { service } = setup();
   await service.create({ ...valid, email: 'gestor@x.com' });
   const client = await service.create({ ...valid, email: 'cliente@x.com', role: 'client' });
-  assert.deepEqual((await service.listClients()).map(user => user.id), [client.id]);
+  assert.deepEqual((await service.listClients(listQuery())).items.map(user => user.id), [client.id]);
+  // ?role=manager na query string não escapa do filtro de clientes
+  assert.equal((await service.listClients(listQuery({ filter: { role: 'manager' } }))).total, 0);
 });
 
 test('ensureAdmin cria o administrador uma única vez', async () => {
   const { service, repo } = setup();
   await service.ensureAdmin({ name: 'Admin', email: 'ADMIN@x.com', password: 'senha-admin' });
   await service.ensureAdmin({ name: 'Admin', email: 'admin@x.com', password: 'senha-admin' });
-  assert.equal((await repo.findByRole('admin')).length, 1);
+  assert.equal((await repo.list(listQuery({ filter: { role: 'admin' } }))).total, 1);
   assert.equal((await repo.findByEmail('admin@x.com'))?.role, 'admin');
 });

@@ -1,3 +1,4 @@
+import type { ListQuery } from '../../src/application/query/list.query.ts';
 import type { Actor } from '../../src/domain/auth/actor.ts';
 import { ROLE_SCOPES } from '../../src/domain/auth/scopes.ts';
 import { User, type UserRole } from '../../src/domain/model/user.ts';
@@ -18,3 +19,14 @@ export const newUser = (role: UserRole, overrides: Partial<{ name: string; email
   });
 
 export const actorOf = (user: User): Actor => actorFor(user.role, user.id);
+
+/** Consulta de listagem já validada, com padrões amplos (para testes de service/repositório). */
+export const listQuery = (overrides: Partial<ListQuery> = {}): ListQuery => ({
+  filter: {},
+  sort: { createdAt: -1 },
+  fields: [],
+  limit: 100,
+  page: 1,
+  skip: 0,
+  ...overrides,
+});

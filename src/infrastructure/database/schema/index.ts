@@ -1,2 +1,5 @@
 export * from './user.schema.ts'
 export * from './job.schema.ts'
+export * from './session.schema.ts'
+export * from './device.schema.ts'
+export * from './pairing.code.schema.ts'

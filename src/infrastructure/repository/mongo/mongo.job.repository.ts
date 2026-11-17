@@ -1,5 +1,6 @@
 import type { Model } from 'mongoose'
-import { JOB_LIST_LIMIT, type IJobRepository } from '../../../application/port/job.repository.ts'
+import type { IJobRepository } from '../../../application/port/job.repository.ts'
+import type { ListQuery, Page } from '../../../application/query/list.query.ts'
 import type { Job, JobStatus } from '../../../domain/model/job.ts'
 import type { IJobModel } from '../../database/schema/index.ts'
 import { JobMapper } from '../../mapper/job.mapper.ts'
@@ -18,13 +19,8 @@ export class MongoJobRepository extends BaseMongoRepository<Job, IJobModel> impl
         return this.find({ status })
     }
 
-    public findAll(): Promise<Job[]> {
-        return this.find({}, { sort: { createdAt: -1 }, limit: JOB_LIST_LIMIT })
-    }
-
-    public findByParticipant(userId: string): Promise<Job[]> {
-        const filter = { $or: [{ managerId: userId }, { clientId: userId }] }
-        return this.find(filter, { sort: { createdAt: -1 }, limit: JOB_LIST_LIMIT })
+    public list(query: ListQuery): Promise<Page<Job>> {
+        return this.findPage(query)
     }
 
     public deleteFinishedBefore(date: Date): Promise<number> {

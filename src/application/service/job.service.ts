@@ -6,6 +6,7 @@ import { validateClientId, validateJobPayload } from '../../domain/validator/job
 import type { IJobQueue } from '../port/job.queue.ts'
 import type { IJobRepository } from '../port/job.repository.ts'
 import type { IUserRepository } from '../port/user.repository.ts'
+import { and, type ListQuery, type Page } from '../query/list.query.ts'
 
 export type SubmitJobInput = { type: string; clientId: unknown; payload: unknown }
 
@@ -49,9 +50,15 @@ export class JobService {
         return job
     }
 
-    /** O filtro vai para a consulta: nunca busca tudo para filtrar depois. */
-    public list(actor: Actor): Promise<Job[]> {
-        return hasScope(actor, SCOPES.jobsReadAny) ? this.#repo.findAll() : this.#repo.findByParticipant(actor.userId)
+    /**
+     * A restrição de acesso entra na consulta junto com os filtros do usuário (nunca busca tudo para filtrar depois).
+     * Como é combinada com $and, nenhum filtro da query string consegue ampliar o que o usuário enxerga.
+     */
+    public list(actor: Actor, query: ListQuery): Promise<Page<Job>> {
+        const access = hasScope(actor, SCOPES.jobsReadAny)
+            ? {}
+            : { $or: [{ managerId: actor.userId }, { clientId: actor.userId }] }
+        return this.#repo.list({ ...query, filter: and(access, query.filter) })
     }
 
     /**

@@ -8,7 +8,7 @@ import { Job } from '../../src/domain/model/job.ts';
 import { InProcessJobQueue } from '../../src/infrastructure/queue/in.process.job.queue.ts';
 import { InMemoryJobRepository } from '../../src/infrastructure/repository/in-memory/in.memory.job.repository.ts';
 import { InMemoryUserRepository } from '../../src/infrastructure/repository/in-memory/in.memory.user.repository.ts';
-import { actorFor, actorOf, newUser } from '../helpers/fixtures.ts';
+import { actorFor, actorOf, listQuery, newUser } from '../helpers/fixtures.ts';
 
 async function setup(handlers: Record<string, JobHandler>, concurrency = 2) {
   const repo = new InMemoryJobRepository();
@@ -54,7 +54,7 @@ test('rejeita tipo desconhecido e payload inválido sem criar job', async () => 
   const { service, admin, submit } = await setup({});
   await assert.rejects(() => submit({}, 'nao.existe'), ValidationError);
   await assert.rejects(() => submit({ month: 'outubro' }), ValidationError);
-  assert.deepEqual(await service.list(admin), []);
+  assert.equal((await service.list(admin, listQuery())).total, 0);
 });
 
 test('respeita o limite de concorrência', async () => {

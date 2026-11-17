@@ -7,12 +7,14 @@ import { createApp } from '../../src/main/app.ts';
 export const ADMIN = { email: 'admin@teste.com', password: 'admin-senha-teste' };
 
 /** Monta uma instância completa da aplicação, respeitando REPOSITORY_DRIVER / QUEUE_DRIVER do ambiente. */
-export async function makeApp() {
+export async function makeApp(overrides: Record<string, string> = {}) {
   const env = loadEnv({
     ...process.env,
+    LOG_LEVEL: process.env.TEST_LOG_LEVEL ?? 'silent', // TEST_LOG_LEVEL=info mostra os logs da aplicação nos testes
     REPORT_DURATION_MS: '50', // relatório rápido nos testes (ignora o valor do .env.docker)
     ADMIN_EMAIL: ADMIN.email,
     ADMIN_PASSWORD: ADMIN.password,
+    ...overrides,
   });
   const container = await buildContainer(env);
   await container.ensureAdmin();

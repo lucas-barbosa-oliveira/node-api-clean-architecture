@@ -6,6 +6,7 @@ import { normalizeEmail } from '../../domain/utils/normalize.ts'
 import { validateCreateUser } from '../../domain/validator/user.validator.ts'
 import type { IPasswordHasher } from '../port/password.hasher.ts'
 import type { IUserRepository } from '../port/user.repository.ts'
+import { and, type ListQuery, type Page } from '../query/list.query.ts'
 
 export class UserService {
     #repo: IUserRepository
@@ -36,9 +37,14 @@ export class UserService {
         return user
     }
 
-    /** Clientes disponíveis para associar a um job. */
-    public listClients(): Promise<User[]> {
-        return this.#repo.findByRole('client')
+    /** Listagem geral (a rota exige users:read:any). */
+    public list(query: ListQuery): Promise<Page<User>> {
+        return this.#repo.list(query)
+    }
+
+    /** Clientes disponíveis para associar a um job; o filtro de papel não pode ser sobrescrito pela query string. */
+    public listClients(query: ListQuery): Promise<Page<User>> {
+        return this.#repo.list({ ...query, filter: and({ role: 'client' }, query.filter) })
     }
 
     /** Cria o administrador inicial se ainda não existir (idempotente; chamado na inicialização). */

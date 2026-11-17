@@ -1,7 +1,9 @@
-import { JOB_LIST_LIMIT, type IJobRepository } from '../../../application/port/job.repository.ts'
+import type { IJobRepository } from '../../../application/port/job.repository.ts'
+import type { ListQuery, Page } from '../../../application/query/list.query.ts'
 import type { Job, JobStatus } from '../../../domain/model/job.ts'
 import type { IJobModel } from '../../database/schema/index.ts'
 import { JobMapper } from '../../mapper/job.mapper.ts'
+import { queryDocs } from './in.memory.query.ts'
 
 export class InMemoryJobRepository implements IJobRepository {
     #docs = new Map<string, IJobModel>()
@@ -21,12 +23,9 @@ export class InMemoryJobRepository implements IJobRepository {
         return this.#mapper.transform(docs.map(item => structuredClone(item)))
     }
 
-    public async findAll(): Promise<Job[]> {
-        return this.#newestFirst([...this.#docs.values()])
-    }
-
-    public async findByParticipant(userId: string): Promise<Job[]> {
-        return this.#newestFirst([...this.#docs.values()].filter(item => item.managerId === userId || item.clientId === userId))
+    public async list(query: ListQuery): Promise<Page<Job>> {
+        const { items, total } = queryDocs([...this.#docs.values()].map(doc => structuredClone(doc)), query)
+        return { items: this.#mapper.transform(items), total }
     }
 
     public async deleteFinishedBefore(date: Date): Promise<number> {
@@ -38,10 +37,5 @@ export class InMemoryJobRepository implements IJobRepository {
             }
         }
         return count
-    }
-
-    #newestFirst(docs: IJobModel[]): Job[] {
-        const sorted = docs.toSorted((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, JOB_LIST_LIMIT)
-        return this.#mapper.transform(sorted.map(item => structuredClone(item)))
     }
 }

@@ -1,7 +1,8 @@
 import type { Model } from 'mongoose'
 import type { IUserRepository } from '../../../application/port/user.repository.ts'
+import type { ListQuery, Page } from '../../../application/query/list.query.ts'
 import { ConflictError } from '../../../domain/error/index.ts'
-import type { User, UserRole } from '../../../domain/model/user.ts'
+import type { User } from '../../../domain/model/user.ts'
 import type { IUserModel } from '../../database/schema/index.ts'
 import { UserMapper } from '../../mapper/user.mapper.ts'
 import { BaseMongoRepository } from '../base/base.repository.ts'
@@ -15,8 +16,8 @@ export class MongoUserRepository extends BaseMongoRepository<User, IUserModel> i
         return this.findOne({ email })
     }
 
-    public findByRole(role: UserRole): Promise<User[]> {
-        return this.find({ role }, { sort: { name: 1 } })
+    public list(query: ListQuery): Promise<Page<User>> {
+        return this.findPage(query)
     }
 
     public async save(user: User): Promise<void> {

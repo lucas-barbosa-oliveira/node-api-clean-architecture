@@ -49,8 +49,8 @@ Content-Type: application/json
 @gestorToken = {{loginGestor.response.body.access_token}}
 @clienteToken = {{loginCliente.response.body.access_token}}
 
-### Gestor lista os clientes disponíveis
-GET {{host}}/clients
+### Gestor lista os clientes disponíveis (busca por nome, ordenação e campos)
+GET {{host}}/clients?name=*caio*&sort=name&fields=name,email
 Authorization: Bearer {{gestorToken}}
 
 ### Gestor cria um job (relatório) para o cliente: responde 202 na hora
@@ -65,9 +65,17 @@ Content-Type: application/json
 GET {{host}}/jobs/{{job.response.body.id}}
 Authorization: Bearer {{clienteToken}}
 
-### Cliente lista os próprios jobs
-GET {{host}}/jobs
+### Cliente lista os próprios jobs (total no header X-Total-Count)
+GET {{host}}/jobs?status=succeeded,running&sort=-createdAt&page=1&limit=10
 Authorization: Bearer {{clienteToken}}
+
+### Jobs dos últimos 7 dias, só alguns campos
+GET {{host}}/jobs?period=7d&fields=status,clientId,createdAt
+Authorization: Bearer {{gestorToken}}
+
+### Admin: usuários com filtro por papel
+GET {{host}}/users?role=client&sort=-createdAt
+Authorization: Bearer {{adminToken}}
 
 ### Dados do usuário logado
 GET {{host}}/users/me
@@ -78,3 +86,98 @@ GET {{host}}/jobs
 
 ### Chaves públicas para validar os tokens (JWKS)
 GET {{host}}/.well-known/jwks.json
+
+### ---------- Sessões: refresh token e revogação ----------
+
+### Renova os tokens do cliente (o refresh token usado deixa de valer)
+# @name renovado
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{ "refresh_token": "{{loginCliente.response.body.refresh_token}}" }
+
+###
+@clienteToken2 = {{renovado.response.body.access_token}}
+
+### Sessões ativas do cliente (a atual vem com current: true)
+GET {{host}}/auth/sessions
+Authorization: Bearer {{clienteToken2}}
+
+### Reusar o refresh token antigo: 401 e a sessão é revogada (detecção de reuso)
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{ "refresh_token": "{{loginCliente.response.body.refresh_token}}" }
+
+### Logout do gestor: o access token deixa de valer na hora
+POST {{host}}/auth/logout
+Authorization: Bearer {{gestorToken}}
+
+### Sair de todos os dispositivos
+POST {{host}}/auth/logout-all
+Authorization: Bearer {{adminToken}}
+
+### Admin derruba todas as sessões de um usuário (faça login do admin de novo antes, se rodou o logout-all)
+DELETE {{host}}/users/{{gestor.response.body.id}}/sessions
+Authorization: Bearer {{adminToken}}
+
+### ---------- Dispositivos (ESP32) ----------
+
+### Novo login do cliente (o exemplo de reuso acima revogou a sessão anterior)
+# @name loginCliente3
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{ "email": "caio@exemplo.com", "password": "senha-cliente" }
+
+###
+@clienteToken3 = {{loginCliente3.response.body.access_token}}
+
+
+### Cliente gera o código de pareamento (válido por 10 min, uso único)
+# @name codigo
+POST {{host}}/clients/{{cliente.response.body.id}}/pairing-codes
+Authorization: Bearer {{clienteToken3}}
+
+### ESP32 troca o código pelo id do cliente e pelo token do dispositivo
+# @name esp32
+POST {{host}}/devices/claim
+Content-Type: application/json
+
+{ "code": "{{codigo.response.body.code}}", "name": "Porta da sala", "hardwareId": "24:6F:28:AB:CD:EF", "firmware": "1.0.0" }
+
+###
+@deviceId = {{esp32.response.body.device_id}}
+@deviceToken = {{esp32.response.body.access_token}}
+
+### ESP32 envia um lote de passagens (clientId devolvido no pareamento)
+# eventId é gerado na ESP32 ($guid gera um UUID aqui); occurredAt vem do relógio sincronizado por NTP
+POST {{host}}/devices/{{deviceId}}/passages
+Authorization: Bearer {{deviceToken}}
+Content-Type: application/json
+
+{
+  "clientId": "{{esp32.response.body.client_id}}",
+  "events": [
+    { "eventId": "{{$guid}}", "occurredAt": "{{$datetime iso8601}}", "direction": "in", "sequence": 1 },
+    { "eventId": "{{$guid}}", "occurredAt": "{{$datetime iso8601 -5 m}}", "direction": "out", "sequence": 2 }
+  ],
+  "device": { "firmware": "1.0.0", "uptimeSeconds": 3600, "rssi": -61 }
+}
+
+### Cliente lista as passagens do dispositivo (InfluxDB)
+GET {{host}}/passages?deviceId={{deviceId}}&sort=-occurredAt&limit=20
+Authorization: Bearer {{clienteToken3}}
+
+### Entradas e saídas por hora nas últimas 24h
+GET {{host}}/passages/summary?window=1h&deviceId={{deviceId}}
+Authorization: Bearer {{clienteToken3}}
+
+### Dispositivos do cliente
+GET {{host}}/devices?status=active
+Authorization: Bearer {{clienteToken3}}
+
+### Revogar o dispositivo (o token dele para de funcionar na hora)
+DELETE {{host}}/devices/{{deviceId}}
+Authorization: Bearer {{clienteToken3}}
+

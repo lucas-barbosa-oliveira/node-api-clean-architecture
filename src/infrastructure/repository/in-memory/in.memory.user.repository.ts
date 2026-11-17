@@ -1,7 +1,9 @@
 import type { IUserRepository } from '../../../application/port/user.repository.ts'
-import type { User, UserRole } from '../../../domain/model/user.ts'
+import type { ListQuery, Page } from '../../../application/query/list.query.ts'
+import type { User } from '../../../domain/model/user.ts'
 import type { IUserModel } from '../../database/schema/index.ts'
 import { UserMapper } from '../../mapper/user.mapper.ts'
+import { queryDocs } from './in.memory.query.ts'
 
 /** Guarda documentos (mesmo formato do Mongo) para exercitar o mapper também sem banco. */
 export class InMemoryUserRepository implements IUserRepository {
@@ -18,9 +20,9 @@ export class InMemoryUserRepository implements IUserRepository {
         return this.#mapper.transform(doc && structuredClone(doc))
     }
 
-    public async findByRole(role: UserRole): Promise<User[]> {
-        const docs = [...this.#docs.values()].filter(item => item.role === role)
-        return this.#mapper.transform(docs.map(item => structuredClone(item)))
+    public async list(query: ListQuery): Promise<Page<User>> {
+        const { items, total } = queryDocs([...this.#docs.values()].map(doc => structuredClone(doc)), query)
+        return { items: this.#mapper.transform(items), total }
     }
 
     public async save(user: User): Promise<void> {

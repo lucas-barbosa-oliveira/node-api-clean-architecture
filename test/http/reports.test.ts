@@ -81,7 +81,7 @@ describe('Reports/Jobs API (job assíncrono com controle de acesso)', () => {
     const { body: forB } = await submit(managerA.token, { clientId: clientB.id, month: '2026-12' });
     const { body: fromB } = await submit(managerB.token, { clientId: clientB.id, month: '2026-12' });
     const list = async (token: string) =>
-      ((await request(ctx.app).get('/jobs').auth(token, { type: 'bearer' })).body as { id: string }[]).map(job => job.id);
+      ((await request(ctx.app).get('/jobs?limit=100').auth(token, { type: 'bearer' })).body as { id: string }[]).map(job => job.id);
 
     const ofClientB = await list(clientB.token);
     assert.ok(ofClientB.includes(forB.id) && ofClientB.includes(fromB.id));
@@ -100,6 +100,74 @@ describe('Reports/Jobs API (job assíncrono com controle de acesso)', () => {
     );
     const jobs = await Promise.all(ids.map(id => waitForJob(ctx.app, clientA.token, id)));
     assert.deepEqual(jobs.map(job => job.status), ['succeeded', 'succeeded', 'succeeded']);
+  });
+});
+
+describe('GET /jobs com query string (query-strings-parser)', () => {
+  let ctx: Awaited<ReturnType<typeof makeApp>>;
+  let manager: TestUser;
+  let client: TestUser;
+  let otherClient: TestUser;
+  const ids: Record<string, string> = {};
+
+  before(async () => {
+    ctx = await makeApp();
+    const adminToken = await loginAsAdmin(ctx.app);
+    // gestor novo: a listagem dele contém só os jobs criados aqui
+    [manager, client, otherClient] = await Promise.all([
+      createUser(ctx.app, adminToken, 'manager'),
+      createUser(ctx.app, adminToken, 'client'),
+      createUser(ctx.app, adminToken, 'client'),
+    ]);
+    for (const [name, clientId, month] of [
+      ['a', client.id, '2026-01'],
+      ['b', client.id, '2026-02'],
+      ['c', otherClient.id, '2026-03'],
+    ]) {
+      const res = await request(ctx.app).post('/reports').auth(manager.token, { type: 'bearer' }).send({ clientId, month });
+      ids[name] = res.body.id;
+      await waitForJob(ctx.app, manager.token, res.body.id);
+    }
+  });
+  after(() => ctx.close());
+
+  const list = (query: string) => request(ctx.app).get(`/jobs${query}`).auth(manager.token, { type: 'bearer' });
+
+  test('filtro por cliente + total no X-Total-Count', async () => {
+    const res = await list(`?clientId=${client.id}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers['x-total-count'], '2');
+    assert.deepEqual(res.body.map((job: { id: string }) => job.id).sort(), [ids.a, ids.b].sort());
+  });
+
+  test('ordenação, paginação e seleção de campos', async () => {
+    const page1 = await list('?sort=createdAt&limit=2&page=1&fields=status,clientId');
+    const page2 = await list('?sort=createdAt&limit=2&page=2&fields=status,clientId');
+    assert.equal(page1.headers['x-total-count'], '3');
+    assert.deepEqual(page1.body.map((job: { id: string }) => job.id), [ids.a, ids.b]);
+    assert.deepEqual(page2.body.map((job: { id: string }) => job.id), [ids.c]);
+    assert.deepEqual(Object.keys(page1.body[0]).sort(), ['clientId', 'id', 'status']);
+  });
+
+  test('status com OU e intervalo de datas', async () => {
+    assert.equal((await list('?status=succeeded,failed')).headers['x-total-count'], '3');
+    assert.equal((await list('?status=pending')).headers['x-total-count'], '0');
+    assert.equal((await list('?createdAt=gte:2000-01-01&createdAt=lt:2000-01-02')).headers['x-total-count'], '0');
+    assert.equal((await list('?period=1d')).headers['x-total-count'], '3');
+  });
+
+  test('o cliente filtrando por outro cliente não vê nada (filtro não amplia o acesso)', async () => {
+    const res = await request(ctx.app).get(`/jobs?clientId=${client.id}`).auth(otherClient.token, { type: 'bearer' });
+    assert.equal(res.headers['x-total-count'], '0');
+  });
+
+  test('parâmetros inválidos respondem 400 com os detalhes', async () => {
+    for (const query of ['?payload=x', '?sort=payload', '?status=pronto', '?createdAt=gte:ontem', '?type=*(a%2B)%2B*']) {
+      const res = await list(query);
+      assert.equal(res.status, 400, query);
+      assert.equal(res.body.code, 'VALIDATION');
+      assert.ok(res.body.issues.length > 0);
+    }
   });
 });
 

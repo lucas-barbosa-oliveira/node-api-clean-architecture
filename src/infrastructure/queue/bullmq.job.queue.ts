@@ -1,8 +1,11 @@
 import { Queue, Worker } from 'bullmq'
 import type { Redis } from 'ioredis'
+import type { ILogger } from '../../application/port/logger.ts'
+import { silentLogger } from '../../application/port/logger.ts'
 import type { JobHandler } from '../../application/port/job.handler.ts'
 import type { IJobQueue } from '../../application/port/job.queue.ts'
 import type { IJobRepository } from '../../application/port/job.repository.ts'
+import { onQueueError } from './queue.errors.ts'
 import { runJob } from './run.job.ts'
 
 const QUEUE_NAME = 'jobs'
@@ -22,7 +25,9 @@ export class BullMqJobQueue implements IJobQueue {
     workerConnection: Redis;
     concurrency?: number;
     queueName?: string;
+    logger?: ILogger;
   }) {
+        const log = deps.logger ?? silentLogger
         const name = deps.queueName ?? QUEUE_NAME
         this.#queue = new Queue(name, { connection: deps.queueConnection })
         this.#worker = new Worker(
@@ -33,7 +38,11 @@ export class BullMqJobQueue implements IJobQueue {
             },
             { connection: deps.workerConnection, concurrency: deps.concurrency ?? 2 },
         )
-        this.#worker.on('error', err => console.error('[jobs worker]', err))
+        this.#queue.on('error', onQueueError(log, `Erro na fila "${name}"`))
+        this.#worker.on('error', onQueueError(log, `Erro no worker da fila "${name}"`))
+        this.#worker.on('failed', (job, err) =>
+            log.warn(`Job ${job?.data.jobId} falhou na fila "${name}" (tentativa ${job?.attemptsMade}): ${err.message}`))
+        log.info(`Fila de jobs "${name}" configurada (BullMQ, concorrência ${deps.concurrency ?? 2})`)
     }
 
     public async enqueue(jobId: string): Promise<void> {

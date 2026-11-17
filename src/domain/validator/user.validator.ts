@@ -6,14 +6,14 @@ const email = z.string().trim().pipe(z.email()).transform(normalizeEmail)
 const password = z.string().min(8, 'A senha deve ter ao menos 8 caracteres').max(128, 'Senha muito longa')
 
 // o administrador não é cadastrado pela API: só gestores e clientes
-const createUserSchema = z.object({
+export const createUserSchema = z.object({
     name: z.string().trim().min(2, 'Nome muito curto'),
     email,
     password,
     role: z.enum(['manager', 'client']),
 })
 
-const loginSchema = z.object({
+export const loginSchema = z.object({
     email,
     password: z.string().min(1),
 })

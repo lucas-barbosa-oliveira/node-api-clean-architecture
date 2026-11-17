@@ -1,6 +1,11 @@
-# Dependências para rodar a API em modo "completo" (Mongo + Redis + Kong Gateway).
-# Uso:  npm run docker:up   (gera kong/kong.yml e as chaves JWT, depois: docker compose up -d --wait)
-# Parar: npm run docker:down (ou: docker compose down; adicione -v para apagar os dados)
+# Ambiente completo: API + Mongo + Redis + InfluxDB + RabbitMQ + Kong Gateway.
+#
+#   npm run docker:up     tudo em containers; acesso pelo Kong em http://localhost:8000
+#   npm run docker:infra  só as dependências; a API roda no host (npm run dev:docker) e o Kong encaminha para ela
+#   npm run docker:down   para tudo (docker compose down -v também apaga os dados)
+#
+# Os dois modos geram kong/kong.yml antes de subir (scripts/setup.kong.ts), apontando o Kong para o container
+# "api" ou para o host. Por isso o Kong é recriado a cada subida.
 name: api-clean-architecture
 
 services:
@@ -31,8 +36,88 @@ services:
       timeout: 3s
       retries: 20
 
+  # Banco de séries temporais para os dados dos sensores (passagens das ESP32).
+  # Na primeira subida cria usuário, organização, bucket e o token de administração (valores locais, sem segredo real).
+  influxdb:
+    image: influxdb:2.7
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: admin-influx-local
+      DOCKER_INFLUXDB_INIT_ORG: app
+      DOCKER_INFLUXDB_INIT_BUCKET: sensors
+      DOCKER_INFLUXDB_INIT_RETENTION: 400d # dados mais antigos são apagados automaticamente
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: dev-influx-token-local # o mesmo de INFLUX_TOKEN no .env.docker
+    ports:
+      - "127.0.0.1:8086:8086" # API e interface web (http://localhost:8086, usuário admin)
+    volumes:
+      - influx-data:/var/lib/influxdb2
+      - influx-config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # Barramento de mensagens entre microsserviços (publish/subscribe e RPC).
+  # Interface de administração: http://localhost:15672 (usuário app / app-rabbit-local).
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    hostname: rabbitmq # o RabbitMQ guarda os dados por nome do nó: hostname fixo mantém filas e exchanges entre recriações
+    environment:
+      # o usuário padrão "guest" só aceita conexões de localhost; containers precisam de outro usuário
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: app-rabbit-local
+    ports:
+      - "127.0.0.1:5672:5672" # AMQP
+      - "127.0.0.1:15672:15672" # interface web
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  # A API (Dockerfile na raiz). Usa as mesmas variáveis do .env.docker, trocando 127.0.0.1 pelos nomes dos serviços.
+  # A porta não é publicada no host: o acesso é sempre pelo Kong. Para depurar direto, descomente "ports".
+  api:
+    build: .
+    image: api-clean-architecture:local
+    env_file: .env.docker
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      REDIS_URL: redis://redis:6379
+      INFLUX_URL: http://influxdb:8086
+      RABBITMQ_URI: amqp://app:app-rabbit-local@rabbitmq:5672
+      PORT: "3000"
+    volumes:
+      # chaves geradas por npm run kong:setup; a privada (0600) precisa pertencer ao uid 1000 (usuário "node" da imagem)
+      - ./keys:/app/keys:ro
+    # ports:
+    #   - "127.0.0.1:3001:3000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      # o barramento não impede a API de subir (os eventos ficam em buffer), mas assim evita logs de tentativa à toa
+      rabbitmq:
+        condition: service_healthy
+    stop_grace_period: 30s # tempo para terminar requisições e jobs em andamento antes do SIGKILL
+    restart: unless-stopped
+    read_only: true # a API não escreve em disco
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
   # API Gateway na frente da API: valida o JWT, aplica rate limit e limite de payload.
-  # A API roda fora do Docker (npm run dev:docker); o Kong a alcança em host.docker.internal:3000.
+  # Encaminha para o container "api" (docker:up) ou para a API no host em host.docker.internal:3000 (docker:infra).
   kong:
     image: kong:3.9
     environment:
@@ -50,7 +135,7 @@ services:
       - "127.0.0.1:8000:8000" # proxy: é por aqui que os clientes acessam a API
       - "127.0.0.1:8001:8001" # Admin API (somente leitura no modo DB-less); nunca exponha publicamente
     extra_hosts:
-      - "host.docker.internal:host-gateway" # permite ao container alcançar a API rodando no host (Linux)
+      - "host.docker.internal:host-gateway" # modo docker:infra: permite ao container alcançar a API no host (Linux)
     healthcheck:
       test: ["CMD", "kong", "health"]
       interval: 5s
@@ -61,3 +146,6 @@ services:
 volumes:
   mongo-data:
   redis-data:
+  influx-data:
+  influx-config:
+  rabbitmq-data:

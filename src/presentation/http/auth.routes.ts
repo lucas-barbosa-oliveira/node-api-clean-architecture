@@ -1,10 +1,20 @@
 import { Router } from 'express'
+import { SCOPES } from '../../domain/auth/scopes.ts'
 import type { authController } from './auth.controller.ts'
+import type { AuthGuards } from './auth.middleware.ts'
 
-/** Rotas públicas: login e chaves públicas para validar os tokens. */
-export function authRoutes(controller: ReturnType<typeof authController>): Router {
+export function authRoutes(controller: ReturnType<typeof authController>, { guard }: AuthGuards): Router {
     const router = Router()
+    // públicas
     router.post('/auth/login', controller.login)
+    router.post('/auth/refresh', controller.refresh)
     router.get('/.well-known/jwks.json', controller.jwks)
+    // sessões do próprio usuário: basta estar autenticado
+    router.post('/auth/logout', guard(), controller.logout)
+    router.post('/auth/logout-all', guard(), controller.logoutAll)
+    router.get('/auth/sessions', guard(), controller.listSessions)
+    router.delete('/auth/sessions/:id', guard(), controller.revokeSession)
+    // administrador: derruba todas as sessões de um usuário
+    router.delete('/users/:id/sessions', guard(SCOPES.sessionsRevokeAny), controller.revokeUserSessions)
     return router
 }

@@ -1,3 +1,4 @@
+import { silentLogger, type ILogger } from '../../application/port/logger.ts'
 import type { JobHandler } from '../../application/port/job.handler.ts'
 import type { IJobQueue } from '../../application/port/job.queue.ts'
 import type { IJobRepository } from '../../application/port/job.repository.ts'
@@ -14,8 +15,10 @@ export class InProcessJobQueue implements IJobQueue {
     #pending: string[] = []
     #running = new Set<Promise<void>>()
     #closed = false
+    #log: ILogger
 
-    constructor(repo: IJobRepository, handlers: Record<string, JobHandler>, concurrency = 2) {
+    constructor(repo: IJobRepository, handlers: Record<string, JobHandler>, concurrency = 2, logger: ILogger = silentLogger) {
+        this.#log = logger
         this.#repo = repo
         this.#handlers = handlers
         this.#concurrency = concurrency
@@ -42,7 +45,7 @@ export class InProcessJobQueue implements IJobQueue {
             await runJob(this.#repo, this.#handlers, id)
         } catch (err) {
             // nunca deixar a Promise rejeitar solta (derrubaria o processo)
-            console.error(`[job ${id}] falha no executor`, err)
+            this.#log.error(`Job ${id}: falha no executor`, { err })
         }
     }
 

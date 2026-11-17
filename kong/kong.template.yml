@@ -27,6 +27,18 @@ services:
         methods: [GET]
         strip_path: false
 
+      # documentação OpenAPI (Swagger UI) e o documento em JSON/YAML; "Try it out" chama a API por este mesmo gateway
+      - name: reference
+        paths: [/reference]
+        methods: [GET]
+        strip_path: false
+        plugins:
+          - name: rate-limiting
+            config:
+              minute: 120
+              limit_by: ip
+              policy: local
+
       - name: auth-login
         paths: [/auth/login]
         methods: [POST]
@@ -40,9 +52,58 @@ services:
               limit_by: ip
               policy: local
 
+      # renovação do access token com o refresh token (o refresh token não é JWT: o Kong não o valida)
+      - name: auth-refresh
+        paths: [/auth/refresh]
+        methods: [POST]
+        strip_path: false
+        plugins:
+          - name: rate-limiting
+            config:
+              minute: 30
+              limit_by: ip
+              policy: local
+
+      # a ESP32 troca o código de pareamento pelo token do dispositivo (pública; o código é a credencial)
+      - name: devices-claim
+        paths: [/devices/claim]
+        methods: [POST]
+        strip_path: false
+        plugins:
+          # o código é curto: limitar tentativas impede adivinhar códigos válidos
+          - name: rate-limiting
+            config:
+              minute: 10
+              hour: 60
+              limit_by: ip
+              policy: local
+
+      # envio de dados pelos dispositivos: token de dispositivo, de longa duração (1 ano)
+      - name: device-telemetry
+        paths: ["~/devices/[^/]+/passages$"]
+        regex_priority: 10
+        methods: [POST]
+        strip_path: false
+        plugins:
+          - name: jwt
+            config:
+              key_claim_name: iss
+              claims_to_verify: [exp]
+              maximum_expiration: 31536000 # 365 dias (o máximo que o Kong aceita)
+              header_names: [authorization]
+              uri_param_names: []
+              cookie_names: []
+          - name: rate-limiting
+            config:
+              minute: 120
+              limit_by: ip
+              policy: local
+
       # ---------- rotas protegidas: exigem JWT válido ----------
+      # O Kong confere assinatura e expiração. Se a sessão foi revogada (logout), quem recusa é a API,
+      # que consulta a sessão a cada requisição: por isso o logout tem efeito imediato.
       - name: protected
-        paths: [/users, /clients, /jobs, /reports]
+        paths: [/users, /clients, /jobs, /reports, /auth/logout, /auth/sessions, /devices, /passages]
         strip_path: false
         plugins:
           - name: jwt

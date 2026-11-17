@@ -98,11 +98,34 @@ describe('Users API', () => {
   });
 
   test('GET /clients: gestor lista clientes; cliente não pode (403)', async () => {
-    const res = await request(ctx.app).get('/clients').auth(manager.token, { type: 'bearer' });
+    const res = await request(ctx.app).get(`/clients?email=${client.email}`).auth(manager.token, { type: 'bearer' });
     assert.equal(res.status, 200);
-    assert.ok(res.body.some((user: { id: string }) => user.id === client.id));
-    assert.ok(res.body.every((user: { role: string }) => user.role === 'client'));
+    assert.deepEqual(res.body.map((user: { id: string }) => user.id), [client.id]);
+    const all = await request(ctx.app).get('/clients?limit=100').auth(manager.token, { type: 'bearer' });
+    assert.ok(all.body.every((user: { role: string }) => user.role === 'client'));
+    // ?role=manager não escapa do filtro de clientes
+    const managers = await request(ctx.app).get(`/clients?email=${manager.email}&role=manager`).auth(manager.token, { type: 'bearer' });
+    assert.equal(managers.headers['x-total-count'], '0');
 
     assert.equal((await request(ctx.app).get('/clients').auth(client.token, { type: 'bearer' })).status, 403);
+  });
+
+  test('GET /users (admin) aceita busca, filtro e campos; nunca expõe nem filtra pelo hash da senha', async () => {
+    const res = await request(ctx.app)
+      .get(`/users?email=${manager.email}&role=manager&fields=name,role`)
+      .auth(adminToken, { type: 'bearer' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, [{ id: manager.id, name: 'Usuário manager', role: 'manager' }]);
+
+    const search = await request(ctx.app).get('/users?name=*USUARIO*&limit=1').auth(adminToken, { type: 'bearer' });
+    assert.equal(search.body.length, 1);
+    assert.ok(Number(search.headers['x-total-count']) >= 2);
+
+    const hash = await request(ctx.app).get('/users?passwordHash=*a*').auth(adminToken, { type: 'bearer' });
+    assert.equal(hash.status, 400);
+  });
+
+  test('GET /users é só para admin (403)', async () => {
+    assert.equal((await request(ctx.app).get('/users').auth(manager.token, { type: 'bearer' })).status, 403);
   });
 });

@@ -1,5 +1,6 @@
 import { Cron } from 'croner'
-import type { BackgroundTask, ITaskScheduler } from '../task.ts'
+import { silentLogger, type ILogger } from '../../application/port/logger.ts'
+import { describeSchedule, type BackgroundTask, type ITaskScheduler } from '../task.ts'
 
 /**
  * Agendador em processo (croner). Para uma instância só: com várias instâncias,
@@ -12,8 +13,10 @@ export class InProcessScheduler implements ITaskScheduler {
     #active = new Set<string>()
     #inflight = new Set<Promise<void>>()
     #controller = new AbortController()
+    #log: ILogger
 
-    constructor(tasks: BackgroundTask[], timezone = 'America/Recife') {
+    constructor(tasks: BackgroundTask[], timezone = 'America/Recife', logger: ILogger = silentLogger) {
+        this.#log = logger
         this.#tasks = tasks
         this.#timezone = timezone
     }
@@ -24,6 +27,7 @@ export class InProcessScheduler implements ITaskScheduler {
             if (task.schedule) {
                 this.#crons.push(new Cron(task.schedule, { timezone: this.#timezone }, () => this.#execute(task)))
             }
+            this.#log.info(`Task ${task.name} configurada (${describeSchedule(task, this.#timezone)})`)
         }
     }
 
@@ -35,7 +39,7 @@ export class InProcessScheduler implements ITaskScheduler {
 
     #execute(task: BackgroundTask): void {
         if (this.#active.has(task.name)) {
-            console.warn(`[${task.name}] ainda em execução; execução ignorada`)
+            this.#log.warn(`Task ${task.name} ainda em execução; execução ignorada`)
             return
         }
         this.#active.add(task.name)
@@ -43,7 +47,7 @@ export class InProcessScheduler implements ITaskScheduler {
             try {
                 await task.run(this.#controller.signal)
             } catch (err) {
-                console.error(`[${task.name}] falhou`, err)
+                this.#log.error(`Task ${task.name} falhou`, { err })
             } finally {
                 this.#active.delete(task.name)
             }

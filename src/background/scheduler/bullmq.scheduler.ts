@@ -1,6 +1,8 @@
 import { Queue, Worker } from 'bullmq'
 import type { Redis } from 'ioredis'
-import type { BackgroundTask, ITaskScheduler } from '../task.ts'
+import { silentLogger, type ILogger } from '../../application/port/logger.ts'
+import { onQueueError } from '../../infrastructure/queue/queue.errors.ts'
+import { describeSchedule, type BackgroundTask, type ITaskScheduler } from '../task.ts'
 
 const QUEUE_NAME = 'background-tasks'
 const STARTUP_DEDUP_TTL_MS = 60_000
@@ -17,6 +19,7 @@ export class BullMqScheduler implements ITaskScheduler {
     #queue: Queue
     #worker: Worker
     #controller = new AbortController()
+    #log: ILogger
 
     constructor(deps: {
     tasks: BackgroundTask[];
@@ -24,7 +27,9 @@ export class BullMqScheduler implements ITaskScheduler {
     workerConnection: Redis;
     timezone?: string;
     queueName?: string;
+    logger?: ILogger;
   }) {
+        this.#log = deps.logger ?? silentLogger
         const name = deps.queueName ?? QUEUE_NAME
         this.#tasks = new Map(deps.tasks.map(task => [task.name, task]))
         this.#timezone = deps.timezone ?? 'America/Recife'
@@ -37,8 +42,9 @@ export class BullMqScheduler implements ITaskScheduler {
             // autorun: false => só começa a consumir depois que os schedulers estiverem registrados
             { connection: deps.workerConnection, concurrency: 1, autorun: false },
         )
-        this.#worker.on('error', err => console.error('[tasks worker]', err))
-        this.#worker.on('failed', (job, err) => console.error(`[${job?.name}] falhou`, err))
+        this.#queue.on('error', onQueueError(this.#log, 'Erro na fila de tasks'))
+        this.#worker.on('error', onQueueError(this.#log, 'Erro no worker de tasks'))
+        this.#worker.on('failed', (job, err) => this.#log.error(`Task ${job?.name} falhou`, { err }))
     }
 
     public async start(): Promise<void> {
@@ -51,6 +57,7 @@ export class BullMqScheduler implements ITaskScheduler {
                     { name: task.name, data: {} },
                 )
             }
+            this.#log.info(`Task ${task.name} configurada (${describeSchedule(task, this.#timezone)})`)
             if (task.runOnStartup) {
                 await this.#queue.add(
                     task.name,
@@ -59,7 +66,7 @@ export class BullMqScheduler implements ITaskScheduler {
                 )
             }
         }
-        this.#worker.run().catch(err => console.error('[tasks worker]', err))
+        this.#worker.run().catch(err => this.#log.error('Worker de tasks parou', { err }))
     }
 
     public async stop(): Promise<void> {

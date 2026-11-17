@@ -1,9 +1,26 @@
 import mongoose, { type Model, type QueryFilter } from 'mongoose'
+import type { Filter, ListQuery, Page, SortOrder } from '../../../application/query/list.query.ts'
 import { ConflictError, ValidationError } from '../../../domain/error/index.ts'
 import type { Entity } from '../../../domain/model/entity.ts'
 import type { IEntityMapper } from '../../mapper/entity.mapper.ts'
 
 export type FindOptions = { sort?: Record<string, 1 | -1>; limit?: number; skip?: number }
+
+/** O campo "id" do domínio é "_id" no Mongo; o restante dos nomes é igual. */
+const mongoField = (field: string) => (field === 'id' ? '_id' : field)
+
+function toMongoFilter(filter: Filter): Record<string, unknown> {
+    return Object.fromEntries(
+        Object.entries(filter).map(([key, value]) =>
+            key === '$and' || key === '$or'
+                ? [key, (value as Filter[]).map(toMongoFilter)]
+                : [mongoField(key), value],
+        ),
+    )
+}
+
+const toMongoSort = (sort: SortOrder): Record<string, 1 | -1> =>
+    Object.fromEntries(Object.entries(sort).map(([field, direction]) => [mongoField(field), direction]))
 
 /**
  * Operações genéricas para repositórios baseados em Mongo (Mongoose).
@@ -63,6 +80,22 @@ export abstract class BaseMongoRepository<M extends Entity, D extends { _id: str
 
     protected find(filter: QueryFilter<D> = {}, options: FindOptions = {}): Promise<M[]> {
         return this.run(async () => this.mapper.transform(await this.model.find(filter, null, options).lean()) as M[])
+    }
+
+    /**
+     * Listagem paginada a partir de uma ListQuery já validada (campos e operadores na lista de permitidos).
+     * O _id entra como desempate da ordenação para a paginação ser estável.
+     */
+    protected findPage(query: ListQuery): Promise<Page<M>> {
+        return this.run(async () => {
+            const filter = toMongoFilter(query.filter) as QueryFilter<D>
+            const sort = { ...toMongoSort(query.sort), _id: 1 as const }
+            const [docs, total] = await Promise.all([
+                this.model.find(filter, null, { sort, skip: query.skip, limit: query.limit }).lean(),
+                this.model.countDocuments(filter),
+            ])
+            return { items: this.mapper.transform(docs as D[]) as M[], total }
+        })
     }
 
     protected count(filter: QueryFilter<D> = {}): Promise<number> {
