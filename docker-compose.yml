@@ -83,7 +83,9 @@ services:
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # como o usuário rabbitmq: rodando como root num volume novo, a CLI cria o .erlang.cookie (dono root) antes do
+      # servidor, que então não consegue lê-lo e não sobe
+      test: ["CMD", "su-exec", "rabbitmq", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 10s
       retries: 20
