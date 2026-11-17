@@ -1,0 +1,10 @@
+# Provisiona os dashboards da API no Grafana do LGTM (montado pelo docker-compose)
+apiVersion: 1
+
+providers:
+  - name: api
+    folder: API
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /otel-lgtm/dashboards/api

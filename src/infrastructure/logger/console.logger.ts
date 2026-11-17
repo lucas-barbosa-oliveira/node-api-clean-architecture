@@ -1,4 +1,4 @@
-import { trace } from '@opentelemetry/api'
+import { logs, SeverityNumber, trace, type AnyValue } from '@opentelemetry/api'
 import type { ILogger, LogLevel, LogMeta } from '../../application/port/logger.ts'
 
 const SEVERITY: Record<LogLevel, number> = { silent: 0, error: 1, warn: 2, info: 3, debug: 4 }
@@ -9,6 +9,12 @@ const COLORS: Record<Exclude<LogLevel, 'silent'>, string> = {
     debug: '\x1b[34m',
 }
 const RESET = '\x1b[0m'
+const OTEL_SEVERITY: Record<Exclude<LogLevel, 'silent'>, SeverityNumber> = {
+    error: SeverityNumber.ERROR,
+    warn: SeverityNumber.WARN,
+    info: SeverityNumber.INFO,
+    debug: SeverityNumber.DEBUG,
+}
 
 export type ConsoleLoggerOptions = {
     /** Identifica a aplicação em cada linha, ex.: api-clean-architecture. */
@@ -65,12 +71,13 @@ export class ConsoleLogger implements ILogger {
         if (SEVERITY[level] > SEVERITY[this.#options.level]) return
         const timestamp = new Date().toISOString()
         const { err, ...rest } = meta ?? {}
-        // dentro de uma requisição ou mensagem rastreada, o log aponta para o trace (busca direta no Jaeger)
+        // dentro de uma requisição ou mensagem rastreada, o log aponta para o trace (do log ao trace no Grafana)
         const span = trace.getActiveSpan()?.spanContext()
         const traceIds = span && span.traceId !== '00000000000000000000000000000000'
             ? { trace_id: span.traceId, span_id: span.spanId }
             : undefined
         const error = err instanceof Error ? err : undefined
+        this.#emitOtel(level, message, rest, err)
 
         if (this.#options.format === 'json') {
             this.#options.write(JSON.stringify({
@@ -95,6 +102,34 @@ export class ConsoleLogger implements ILogger {
         else if (err !== undefined) line += ` ${safeJson(err)}`
         this.#options.write(line, level)
     }
+
+    /**
+     * Envia a linha também como log OpenTelemetry (Loki no Grafana LGTM); sem o SDK ligado, o provider global é um
+     * no-op. O registro herda o contexto ativo, então leva o trace_id e o Grafana liga o log ao trace.
+     */
+    #emitOtel(level: Exclude<LogLevel, 'silent'>, message: string, meta: LogMeta, err: unknown): void {
+        const attributes: Record<string, AnyValue> = {}
+        if (this.#component) attributes.component = this.#component
+        for (const [key, value] of Object.entries(meta)) attributes[key] = toAttribute(value)
+        if (err instanceof Error) {
+            attributes['exception.type'] = err.name
+            attributes['exception.message'] = err.message
+            if (err.stack) attributes['exception.stacktrace'] = err.stack
+        } else if (err !== undefined) {
+            attributes.err = toAttribute(err)
+        }
+        logs.getLogger(this.#options.label).emit({
+            severityNumber: OTEL_SEVERITY[level],
+            severityText: level,
+            body: message,
+            attributes,
+        })
+    }
+}
+
+function toAttribute(value: unknown): string | number | boolean {
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value
+    return safeJson(value)
 }
 
 function defaultWrite(line: string, level: LogLevel): void {

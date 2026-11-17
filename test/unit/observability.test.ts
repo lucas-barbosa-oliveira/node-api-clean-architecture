@@ -6,6 +6,8 @@ import { silentLogger } from '../../src/application/port/logger.ts';
 import type { IntegrationEvent } from '../../src/application/port/event.bus.ts';
 import { InMemoryEventBus } from '../../src/infrastructure/eventbus/in.memory.event.bus.ts';
 import { topicMatches } from '../../src/infrastructure/eventbus/topic.ts';
+import { logs, SeverityNumber } from '@opentelemetry/api';
+import { InMemoryLogRecordExporter, LoggerProvider, SimpleLogRecordProcessor } from '@opentelemetry/sdk-logs';
 import { ConsoleLogger } from '../../src/infrastructure/logger/console.logger.ts';
 import { redactUri, retryUntilConnected } from '../../src/infrastructure/resilience/retry.ts';
 import { InMemoryOutbox } from '../../src/infrastructure/outbox/in.memory.outbox.ts';
@@ -40,6 +42,33 @@ describe('ConsoleLogger', () => {
     assert.equal(entry.level, 'info');
     assert.equal(entry.component, 'http');
     assert.equal(entry.request_id, 'abc');
+  });
+
+  test('com o OpenTelemetry ligado, cada linha também vira log OTLP (Loki), respeitando o nível', async () => {
+    const exporter = new InMemoryLogRecordExporter();
+    const provider = new LoggerProvider({ processors: [new SimpleLogRecordProcessor({ exporter })] });
+    logs.setGlobalLoggerProvider(provider);
+    try {
+      const { logger } = capture('info');
+      logger.child('outbox').warn('Falha ao publicar', { attempts: 3, event: { id: 'e1' }, err: new TypeError('broker fora') });
+      logger.debug('abaixo do nível, não sai');
+
+      const [record, ...rest] = exporter.getFinishedLogRecords();
+      assert.equal(rest.length, 0);
+      assert.equal(record.body, 'Falha ao publicar');
+      assert.equal(record.severityNumber, SeverityNumber.WARN);
+      assert.equal(record.severityText, 'warn');
+      assert.equal(record.instrumentationScope.name, 'api.app');
+      assert.equal(record.attributes.component, 'outbox');
+      assert.equal(record.attributes.attempts, 3);
+      assert.equal(record.attributes.event, '{"id":"e1"}');
+      assert.equal(record.attributes['exception.type'], 'TypeError');
+      assert.equal(record.attributes['exception.message'], 'broker fora');
+      assert.match(String(record.attributes['exception.stacktrace']), /TypeError: broker fora/);
+    } finally {
+      logs.disable();
+      await provider.shutdown();
+    }
   });
 });
 

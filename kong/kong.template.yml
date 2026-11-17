@@ -142,7 +142,7 @@ plugins:
       generator: uuid
       echo_downstream: true
 
-  # traces do gateway enviados ao Jaeger; o contexto segue para a API no header traceparent (W3C)
+  # traces do gateway enviados ao Grafana LGTM (Tempo); o contexto segue para a API no header traceparent (W3C)
   - name: opentelemetry
     config:
       traces_endpoint: ${{ KONG_OTEL_TRACES_ENDPOINT }}

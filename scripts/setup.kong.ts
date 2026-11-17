@@ -36,7 +36,7 @@ if (!existsSync(privateKeyPath) || !existsSync(publicKeyPath)) {
 }
 
 const publicKey = (await readFile(publicKeyPath, 'utf8')).trim()
-const tracesEndpoint = process.env.KONG_OTEL_TRACES_ENDPOINT ?? 'http://jaeger:4318/v1/traces'
+const tracesEndpoint = process.env.KONG_OTEL_TRACES_ENDPOINT ?? 'http://lgtm:4318/v1/traces'
 const values: Record<string, string> = {
     JWT_ISSUER: issuer,
     KONG_UPSTREAM_URL: upstreamUrl,

@@ -1,4 +1,5 @@
-# Prometheus opcional (docker compose --profile metrics up -d prometheus): coleta as métricas da API.
+# Prometheus avulso (docker compose --profile metrics up -d prometheus): coleta /metrics da API por scrape.
+# O Grafana LGTM recebe as mesmas métricas por OTLP; este arquivo mostra a alternativa por scrape.
 global:
   scrape_interval: 15s
 

@@ -12,7 +12,7 @@ API de exemplo com Express 5, TypeScript rodando nativamente no Node (sem build)
 - Query string: `query-strings-parser`
 - Séries temporais: InfluxDB 2.7 com `@influxdata/influxdb-client`
 - Barramento: RabbitMQ 4.1 com `amqplib` (publish/subscribe e RPC, compatível com serviços que usam a `amqp-client-node`), com outbox transacional no MongoDB (replica set)
-- Observabilidade: OpenTelemetry (traces para o Jaeger, métricas no formato Prometheus), logs com `trace_id`
+- Observabilidade: OpenTelemetry com Grafana LGTM (traces no Tempo, métricas no Prometheus, logs no Loki) e dashboard pronto; logs com `trace_id`
 - CI: GitHub Actions (lint, typecheck, testes, integração e teste de fumaça da imagem) e Dependabot
 - Documentação: OpenAPI 3.1 gerado a partir dos schemas zod, com Swagger UI (`swagger-ui-dist`) em `/reference`
 - Testes: `node:test` + supertest
@@ -109,8 +109,9 @@ docker compose exec redis redis-cli        # KEYS bull:*
 curl -s localhost:8001/routes | node -pe "JSON.parse(require('fs').readFileSync(0)).data.map(r=>r.name)"  # rotas no Kong
 docker compose logs -f kong                # logs de acesso do gateway
 # RabbitMQ: interface web em http://localhost:15672 (app / app-rabbit-local)
-# Jaeger (traces): http://localhost:16686 | métricas da API: http://localhost:9464/metrics
-# Prometheus (opcional): docker compose --profile metrics up -d prometheus -> http://localhost:9090
+# Grafana (traces, métricas e logs): http://localhost:3001 -> Dashboards > API > API Clean Architecture
+# métricas da API no formato Prometheus: http://localhost:9464/metrics
+# Prometheus avulso (opcional): docker compose --profile metrics up -d prometheus -> http://localhost:9090
 # InfluxDB: interface web em http://localhost:8086 (admin / admin-influx-local), bucket "sensors"
 docker compose exec influxdb influx query --org app --token dev-influx-token-local \
   'from(bucket:"sensors") |> range(start:-1d) |> filter(fn:(r)=> r._measurement=="passage")'
@@ -326,7 +327,7 @@ api-clean-architecture @ 2026-11-17T14:14:26.482Z info: [rabbitmq] Evento Reques
 - **Implementação:** a aplicação depende da porta `ILogger` (`application/port/logger.ts`); a implementação é `infrastructure/logger/console.logger.ts`, sem dependências. Trocar por winston ou pino é escrever outro adaptador.
 - **Requisições:** uma linha por requisição no formato *combined* com o tempo de resposta. `/health` e `/health/*` (chamados pelo Docker e pelo balanceador) só aparecem em `debug`.
 - **Erros não tratados:** saem com o stack e o `request_id`.
-- **Correlação com traces:** com o OpenTelemetry ligado, cada linha registrada dentro de uma requisição ou mensagem termina com `trace_id=...`, o id para buscar o trace no Jaeger (em JSON, campos `trace_id` e `span_id`).
+- **Correlação com traces:** com o OpenTelemetry ligado, cada linha registrada dentro de uma requisição ou mensagem termina com `trace_id=...`, o id para buscar o trace no Grafana (em JSON, campos `trace_id` e `span_id`). Com o OpenTelemetry ligado, a mesma linha também vai para o Loki, já associada ao trace.
 
 ### Conexões e reconexões
 
@@ -370,7 +371,7 @@ POST /users ──► transação { insert users, insert outbox_events } ──�
 - **Garantias:** o evento só existe se o dado foi gravado, e nunca se perde com o RabbitMQ fora do ar ou com a API reiniciando, porque fica no banco esperando. Há novas tentativas com espera crescente, até 5 minutos.
 - **Entrega "pelo menos uma vez":** se a instância cair entre publicar e marcar como enviado, o evento sai de novo com o mesmo `messageId`. Os consumidores descartam repetidos pelo `messageId` (ou pelo `audit.id`).
 - **Várias instâncias:** cada evento é reservado por uma só (`findOneAndUpdate` atômico), sem envio duplicado.
-- **Trace contínuo:** o relay publica dentro do trace de quem gravou o evento, então requisição e publicação aparecem no mesmo trace no Jaeger.
+- **Trace contínuo:** o relay publica dentro do trace de quem gravou o evento, então requisição e publicação aparecem no mesmo trace no Grafana (Tempo).
 - **Limpeza:** eventos enviados ficam 7 dias (índice TTL) para investigação. Pendentes e idade do mais antigo aparecem em `/health/ready` e nas métricas `outbox_events_pending` e `outbox_oldest_pending_age`.
 - **Replica set obrigatório:** o MongoDB precisa ser replica set para ter transações. O compose já sobe assim (`--replSet rs0`, iniciado pelo healthcheck), e a URI usa `?directConnection=true`. Com um `mongod` avulso, a API funciona, mas avisa no log que dado e evento não serão atômicos.
 - **Implementação:** `transactionAsyncLocalStorage` do Mongoose, que repassa a sessão da transação a todas as operações do callback sem mudar nenhum repositório.
@@ -443,17 +444,22 @@ A cada requisição (exceto `AUDIT_IGNORE_PATHS`, por padrão `/health`, `/.well
 
 Ligado quando `OTEL_EXPORTER_OTLP_ENDPOINT` está definido (já está no `.env.docker` e no compose). Carregado antes da aplicação com `node --import ./src/main/telemetry.ts` (os scripts npm e o Dockerfile já fazem isso).
 
-| Sinal | Onde ver | Conteúdo |
-|---|---|---|
-| Traces | Jaeger, `http://localhost:16686` | Kong → API → MongoDB, Redis, RabbitMQ: um trace por requisição, do gateway ao banco, incluindo a publicação feita depois pelo outbox |
-| Métricas | `http://localhost:9464/metrics` (Prometheus); Prometheus opcional em `:9090` com `docker compose --profile metrics up -d prometheus` | Latência HTTP (`http_server_request_duration`), event loop, heap, GC, conexões do Mongo, `outbox_events_pending`, `outbox_oldest_pending_age`, `outbox_events_published_total`, `jobs_completed_total`, `jobs_duration`, `passages_written_total` |
-| Logs | stdout | `trace_id` em cada linha registrada dentro de um trace |
+A API envia os três sinais por OTLP ao **Grafana LGTM** (`grafana/otel-lgtm`: OpenTelemetry Collector + Tempo + Prometheus + Loki + Grafana em um contêiner, para desenvolvimento). Grafana em **http://localhost:3001**, entrando direto como admin (a porta 3000 fica para a API).
 
+| Sinal | Onde ver no Grafana | Conteúdo |
+|---|---|---|
+| Traces | Explore > Tempo | Kong → API → MongoDB, Redis, RabbitMQ: um trace por requisição, do gateway ao banco, incluindo a publicação feita depois pelo outbox |
+| Métricas | Explore > Prometheus | Latência HTTP (`http_server_request_duration_seconds`), event loop, heap, GC, `outbox_events_pending`, `outbox_oldest_pending_age_seconds`, `outbox_events_published_total`, `outbox_events_failed_total`, `jobs_completed_total`, `jobs_duration_seconds`, `passages_written_total` |
+| Logs | Explore > Loki (`{service_name="api-clean-architecture"}`) | Cada linha do logger, com nível, componente, metadados e `trace_id` |
+
+- **Dashboard pronto:** *Dashboards > API > API Clean Architecture*, provisionado de [`observability/grafana/dashboards/api.json`](observability/grafana/dashboards/api.json): taxa, erros 5xx e latência p95 por rota; outbox (pendentes, idade do mais antigo, publicados e falhas); jobs; passagens; event loop e heap; logs filtráveis por nível e texto; traces recentes. Pode ser editado na interface; para versionar, exporte o JSON por cima do arquivo.
+- **Log ↔ trace:** no painel de logs, o `trace_id` vira link para o trace no Tempo; num trace, *Logs for this span* abre as linhas do Loki daquele trace.
+- **Também por scrape:** as mesmas métricas ficam em `http://localhost:9464/metrics`, no formato Prometheus (para um Prometheus já existente ou um cluster Kubernetes). O Prometheus avulso do compose demonstra isso: `docker compose --profile metrics up -d prometheus`, interface em `http://localhost:9090`, coletando `api:9464` (API em contêiner) e `host.docker.internal:9464` (API no host); o alvo que não estiver rodando aparece como `down`.
 - **Instrumentação automática:** HTTP, Express, MongoDB, ioredis (BullMQ) e amqplib. O contexto do trace segue nos headers das mensagens do RabbitMQ, então um serviço que consome e também usa OpenTelemetry continua o mesmo trace.
 - **Fora dos traces:** `/health/*`, os arquivos da documentação e `/metrics` não geram trace (só ruído). Os spans do MongoDB não gravam os valores das consultas.
-- **Kong:** o plugin `opentelemetry` envia os spans do gateway ao Jaeger e passa o contexto adiante pelo header `traceparent` (W3C).
-- **Métricas de negócio:** ficam em `infrastructure/telemetry/metrics.ts`. Sem o SDK carregado (testes, modo rápido), a API do OpenTelemetry não faz nada e não custa nada.
-- **Variáveis padrão do OpenTelemetry:** `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` (amostragem em produção), `OTEL_SDK_DISABLED`.
+- **Kong:** o plugin `opentelemetry` envia os spans do gateway ao LGTM e passa o contexto adiante pelo header `traceparent` (W3C).
+- **Métricas de negócio:** ficam em `infrastructure/telemetry/metrics.ts`. Sem o SDK carregado (testes, modo rápido), a API do OpenTelemetry não faz nada e não custa nada; o mesmo vale para os logs OTLP do `ConsoleLogger`.
+- **Variáveis padrão do OpenTelemetry:** `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` (amostragem em produção), `OTEL_METRIC_EXPORT_INTERVAL` (padrão 15000 ms), `OTEL_SDK_DISABLED`.
 
 ## Integração contínua
 
@@ -496,8 +502,9 @@ Sem `.env` valem os padrões abaixo. Copie `.env.example` para `.env` para custo
 | `RABBITMQ_RETRY_INTERVAL_MS` / `RABBITMQ_RPC_TIMEOUT_MS` | `2000` / `5000` | Intervalo entre tentativas de reconexão / tempo máximo de uma chamada RPC |
 | `QUEUE_PREFIX` | `bull` | Prefixo das chaves do BullMQ no Redis; separa ambientes no mesmo Redis (os testes usam `bull-<banco>`) |
 | `OUTBOX_POLL_INTERVAL_MS` | `1000` | Intervalo com que o relay procura eventos gravados por outras instâncias (os desta instância saem na hora) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Liga o OpenTelemetry e define para onde vão os traces (ex.: `http://127.0.0.1:4318`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Liga o OpenTelemetry e define para onde vão traces, métricas e logs (ex.: `http://127.0.0.1:4318`) |
 | `OTEL_SERVICE_NAME` / `OTEL_METRICS_PORT` | `APP_NAME` / `9464` | Nome do serviço nos traces / porta do `/metrics` |
+| `OTEL_METRICS_HOST` | `0.0.0.0` | Interface do `/metrics` (todas, para o Prometheus coletar de fora do contêiner) |
 | `AUDIT_ENABLED` / `AUDIT_IGNORE_PATHS` / `AUDIT_MAX_BODY_BYTES` | `true` / `/health,/.well-known,/reference` / `16384` | Auditoria por requisição |
 | `API_DOCS_ENABLED` | `true` | Swagger UI e documento OpenAPI em `/reference` |
 | `KONG_UPSTREAM_URL` | `http://api:3000` | Só para `npm run kong:setup`: onde o Kong encontra a API (`docker:infra` usa `http://host.docker.internal:3000`) |
@@ -552,6 +559,7 @@ src/
   main/            app.ts e server.ts
 test/              unit, http (supertest) e integration
 kong/              kong.template.yml (versionado) -> kong.yml (gerado)
+observability/     dashboard e provisionamento do Grafana; prometheus.yml (Prometheus avulso)
 scripts/           setup.kong.ts
 keys/              par de chaves dos JWTs (gerado, fora do git)
 ```
@@ -591,7 +599,8 @@ Regra de dependência: `domain` ← `application` ← (`presentation` | `backgro
 - **"Barramento indisponível: eventos ficam no outbox" logo na inicialização:** é normal se o relay rodar antes de a conexão com o RabbitMQ abrir. Os eventos saem assim que ela abre.
 - **"MongoDB sem replica set" no log:** o Mongo foi iniciado sem `--replSet` (ex.: um container antigo). Recrie com `docker compose up -d mongo` e use `?directConnection=true` na `MONGO_URI`.
 - **`/health/ready` responde 503:** veja no corpo qual dependência crítica está `down`.
-- **Nenhum trace no Jaeger:** confirme `OTEL_EXPORTER_OTLP_ENDPOINT` e que a API subiu com `--import ./src/main/telemetry.ts`. O log de inicialização mostra `[telemetry] traces para ...`.
+- **Nada chega ao Grafana:** confirme `OTEL_EXPORTER_OTLP_ENDPOINT` e que a API subiu com `--import ./src/main/telemetry.ts`. O log de inicialização mostra `[telemetry] traces, métricas e logs para ...`. Na busca do Tempo, ajuste o intervalo de tempo (traces recém-chegados levam alguns segundos para aparecer).
+- **Traces e métricas chegam, logs não:** o Loki recusa gravações com o disco da máquina acima de 90% (`Ingester is shutting down`). Libere espaço ou, só em desenvolvimento, `LOKI_EXTRA_ARGS=-ingester.wal-disk-full-threshold=0 docker compose up -d lgtm`.
 - **`EADDRINUSE :9464` com duas instâncias no host:** dê a cada uma um `OTEL_METRICS_PORT` diferente.
 - **Ver os logs da aplicação nos testes:** `TEST_LOG_LEVEL=info npm test`.
 - **`400` em uma listagem:** a resposta traz em `issues` o campo, operador ou valor recusado.
