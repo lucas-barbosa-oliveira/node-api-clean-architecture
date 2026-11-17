@@ -1,5 +1,6 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import mongoose from 'mongoose';
 import request from 'supertest';
 import type { IntegrationEvent } from '../../src/application/port/event.bus.ts';
 import { InMemoryEventBus } from '../../src/infrastructure/eventbus/in.memory.event.bus.ts';
@@ -12,15 +13,30 @@ describe('Auditoria e RPC pelo barramento', () => {
   let ctx: Awaited<ReturnType<typeof makeApp>>;
   let bus: InMemoryEventBus;
   const events: IntegrationEvent[] = [];
+  const domainEvents: IntegrationEvent[] = [];
+  const dbName = `audit_test_${Date.now()}`;
   const audits = () => events.map(event => event.audit as Record<string, any>);
 
   before(async () => {
-    ctx = await makeApp({ EVENT_BUS_DRIVER: 'memory', APP_NAME: 'api-teste' });
+    // banco próprio: o relay deste teste não encontra eventos pendentes deixados pelos outros testes
+    ctx = await makeApp({ EVENT_BUS_DRIVER: 'memory', APP_NAME: 'api-teste', MONGO_DB: dbName });
     bus = ctx.container.eventBus as InMemoryEventBus;
     bus.subscribe({ eventName: 'RequestAuditEvent', exchange: 'audit', routingKey: 'audit.#', handle: async e => { events.push(e); } });
+    for (const [eventName, exchange] of [['UserCreatedEvent', 'users'], ['DevicePairedEvent', 'devices'], ['DeviceRevokedEvent', 'devices']]) {
+      bus.subscribe({ eventName, exchange, routingKey: '#', handle: async e => { domainEvents.push(e); } });
+    }
     registerEventBus(bus, { userService: ctx.container.userService, jobService: ctx.container.jobService });
+    bus.start();
+    ctx.container.outboxRelay.start(); // a auditoria vai para o outbox; o relay publica no barramento
   });
-  after(() => ctx.close());
+  after(async () => {
+    await ctx.close();
+    if (process.env.REPOSITORY_DRIVER === 'mongo') {
+      const connection = await mongoose.createConnection(process.env.MONGO_URI as string, { dbName }).asPromise();
+      await connection.dropDatabase();
+      await connection.close();
+    }
+  });
 
   const findAudit = async (requestId: string) => {
     await bus.drain();
@@ -89,5 +105,26 @@ describe('Auditoria e RPC pelo barramento', () => {
 
     await assert.rejects(bus.executeResource('api-teste', 'users.find', '?senha=1'), /inválidos/);
     await assert.rejects(bus.executeResource('api-teste', 'users.findone', crypto.randomUUID()), /não encontrado/);
+  });
+
+  test('eventos de domínio saem pelo outbox: usuário criado, dispositivo pareado e revogado', async () => {
+    const token = await loginAsAdmin(ctx.app);
+    const client = await createUser(ctx.app, token, 'client');
+    const code = await request(ctx.app).post(`/clients/${client.id}/pairing-codes`).auth(client.token, { type: 'bearer' }).expect(201);
+    const hardwareId = '24:6F:28:00:00:01';
+    const first = await request(ctx.app).post('/devices/claim').send({ code: code.body.code, hardwareId }).expect(201);
+    // o mesmo hardware pareado de novo revoga o registro anterior
+    const code2 = await request(ctx.app).post(`/clients/${client.id}/pairing-codes`).auth(client.token, { type: 'bearer' }).expect(201);
+    await request(ctx.app).post('/devices/claim').send({ code: code2.body.code, hardwareId }).expect(201);
+
+    const of = (name: string) => domainEvents.filter(e => e.event_name === name);
+    await waitUntil(async () => of('DeviceRevokedEvent').length, n => n >= 1, 3000);
+    const created = of('UserCreatedEvent').find(e => (e.user as { id: string }).id === client.id) as Record<string, any>;
+    assert.equal(created.user.email, client.email);
+    assert.equal(created.user.passwordHash, undefined);
+    assert.ok(of('DevicePairedEvent').some(e => (e.device as { id: string }).id === first.body.device_id));
+    const revoked = of('DeviceRevokedEvent').find(e => (e.device as { id: string }).id === first.body.device_id) as Record<string, any>;
+    assert.equal(revoked.reason, 'replaced_by_new_pairing');
+    assert.equal(revoked.device.status, 'revoked');
   });
 });

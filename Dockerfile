@@ -28,10 +28,10 @@ COPY src ./src
 
 # usuário sem privilégios (uid 1000, já existe na imagem oficial)
 USER node
-EXPOSE 3000
+EXPOSE 3000 9464
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
     CMD ["node", "-e", "fetch(`http://127.0.0.1:${process.env.PORT}/health`).then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 
 # sem npm na frente: o SIGTERM do "docker stop" chega direto ao Node, que encerra de forma graciosa (src/main/server.ts)
-CMD ["node", "src/main/server.ts"]
+CMD ["node", "--import", "./src/main/telemetry.ts", "src/main/server.ts"]

@@ -35,6 +35,11 @@ export class RedisConnections {
         await Promise.all(this.#all.map(item => item.ready))
     }
 
+    /** Estado de cada conexão ("ready" quando pronta), para o /health/ready. */
+    public status(): Record<string, string> {
+        return Object.fromEntries(this.#all.map(item => [item.name, item.connection.status]))
+    }
+
     public async close(): Promise<void> {
         this.#closing = true
         await Promise.allSettled(this.#all.map(item => item.connection.quit()))

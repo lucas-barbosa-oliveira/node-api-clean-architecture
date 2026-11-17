@@ -1,4 +1,4 @@
-# Ambiente completo: API + Mongo + Redis + InfluxDB + RabbitMQ + Kong Gateway.
+# Ambiente completo: API + Mongo + Redis + InfluxDB + RabbitMQ + Kong Gateway + Jaeger (traces).
 #
 #   npm run docker:up     tudo em containers; acesso pelo Kong em http://localhost:8000
 #   npm run docker:infra  só as dependências; a API roda no host (npm run dev:docker) e o Kong encaminha para ela
@@ -9,14 +9,22 @@
 name: api-clean-architecture
 
 services:
+  # Replica set de um nó: transações (dado + evento no outbox gravados juntos) exigem replica set.
+  # O healthcheck inicia o replica set na primeira subida e só fica healthy com um primário eleito.
   mongo:
     image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
     ports:
       - "127.0.0.1:27017:27017" # só acessível da sua máquina (sem autenticação: uso local)
     volumes:
       - mongo-data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "try { rs.status() } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'localhost:27017' }] }) }; quit(db.hello().isWritablePrimary ? 0 : 1)"
       interval: 5s
       timeout: 5s
       retries: 20
@@ -81,6 +89,24 @@ services:
       retries: 20
       start_period: 20s
 
+  # Traces (OpenTelemetry): a API e o Kong enviam por OTLP; interface em http://localhost:16686
+  jaeger:
+    image: jaegertracing/jaeger:2.12.0
+    ports:
+      - "127.0.0.1:16686:16686" # interface web
+      - "127.0.0.1:4318:4318" # OTLP/HTTP (usado pela API rodando no host, no modo docker:infra)
+
+  # Métricas (opcional): docker compose --profile metrics up -d prometheus -> http://localhost:9090
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: ["metrics"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   # A API (Dockerfile na raiz). Usa as mesmas variáveis do .env.docker, trocando 127.0.0.1 pelos nomes dos serviços.
   # A porta não é publicada no host: o acesso é sempre pelo Kong. Para depurar direto, descomente "ports".
   api:
@@ -88,10 +114,11 @@ services:
     image: api-clean-architecture:local
     env_file: .env.docker
     environment:
-      MONGO_URI: mongodb://mongo:27017
+      MONGO_URI: mongodb://mongo:27017/?directConnection=true
       REDIS_URL: redis://redis:6379
       INFLUX_URL: http://influxdb:8086
       RABBITMQ_URI: amqp://app:app-rabbit-local@rabbitmq:5672
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       PORT: "3000"
     volumes:
       # chaves geradas por npm run kong:setup; a privada (0600) precisa pertencer ao uid 1000 (usuário "node" da imagem)
@@ -129,6 +156,9 @@ services:
       KONG_ADMIN_ACCESS_LOG: /dev/stdout
       KONG_PROXY_ERROR_LOG: /dev/stderr
       KONG_ADMIN_ERROR_LOG: /dev/stderr
+      # traces do gateway (plugin opentelemetry): o trace começa no Kong e continua na API
+      KONG_TRACING_INSTRUMENTATIONS: request,balancer
+      KONG_TRACING_SAMPLING_RATE: "1.0"
     volumes:
       - ./kong/kong.yml:/kong/kong.yml:ro # gerado por npm run kong:setup
     ports:

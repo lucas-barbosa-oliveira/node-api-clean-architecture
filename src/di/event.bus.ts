@@ -14,7 +14,6 @@ export async function buildEventBus(env: Env, logger: ILogger): Promise<IEventBu
             logger: logger.child('rabbitmq'),
             retryIntervalMs: env.RABBITMQ_RETRY_INTERVAL_MS,
             rpcTimeoutMs: env.RABBITMQ_RPC_TIMEOUT_MS,
-            bufferSize: env.EVENT_BUS_BUFFER_SIZE,
         })
     }
     return new InMemoryEventBus({ service: env.APP_NAME, logger: logger.child('eventbus') })

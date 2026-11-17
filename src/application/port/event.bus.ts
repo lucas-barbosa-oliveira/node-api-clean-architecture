@@ -27,6 +27,19 @@ export type RpcResource = {
     handle(...params: unknown[]): Promise<unknown>;
 }
 
+export type PublishOptions = {
+    /** Id da mensagem (o outbox usa o id do registro: o consumidor descarta reentregas pelo messageId). */
+    messageId?: string;
+}
+
+/** O barramento está fora do ar: quem publica deve tentar de novo depois (o outbox faz isso). */
+export class EventBusUnavailableError extends Error {
+    constructor(message = 'Barramento indisponível') {
+        super(message)
+        this.name = 'EventBusUnavailableError'
+    }
+}
+
 /**
  * Barramento de mensagens entre microsserviços (publish/subscribe e RPC).
  * Assinaturas e recursos podem ser registrados antes de start(): são aplicados quando a conexão abrir.
@@ -36,14 +49,16 @@ export interface IEventBus {
     /** Começa a conectar em segundo plano; não espera conseguir (a API sobe mesmo com o barramento fora do ar). */
     start(): void;
     /**
-     * Publica em uma exchange do tipo topic. Se o barramento estiver fora do ar, o evento fica em um buffer
-     * (limitado) e é enviado quando a conexão voltar.
+     * Publica em uma exchange do tipo topic e só resolve quando o broker confirmar o recebimento.
+     * Com o barramento fora do ar, rejeita com EventBusUnavailableError. Os services não chamam direto:
+     * gravam no outbox (IOutbox), e o relay publica com novas tentativas.
      */
-    publish(exchange: string, routingKey: string, event: IntegrationEvent): Promise<void>;
+    publish(exchange: string, routingKey: string, event: IntegrationEvent, options?: PublishOptions): Promise<void>;
     subscribe(subscription: EventSubscription): void;
     provideResource(resource: RpcResource): void;
     /** Chama um recurso RPC de outro serviço. Falha se o barramento estiver fora do ar ou o tempo esgotar. */
     executeResource(service: string, resource: string, ...params: unknown[]): Promise<unknown>;
-    /** Tenta enviar o que estiver no buffer e fecha as conexões. */
+    /** Estado de cada conexão, para o /health/ready (ex.: { publish: true, consume: false }). */
+    status(): Record<string, boolean>;
     close(): Promise<void>;
 }

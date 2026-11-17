@@ -27,20 +27,22 @@ export class BullMqScheduler implements ITaskScheduler {
     workerConnection: Redis;
     timezone?: string;
     queueName?: string;
+    /** Prefixo das chaves no Redis (padrão do BullMQ: bull). */
+    prefix?: string;
     logger?: ILogger;
   }) {
         this.#log = deps.logger ?? silentLogger
         const name = deps.queueName ?? QUEUE_NAME
         this.#tasks = new Map(deps.tasks.map(task => [task.name, task]))
         this.#timezone = deps.timezone ?? 'America/Recife'
-        this.#queue = new Queue(name, { connection: deps.queueConnection })
+        this.#queue = new Queue(name, { connection: deps.queueConnection, prefix: deps.prefix })
         this.#worker = new Worker(
             name,
             async job => {
                 await this.#tasks.get(job.name)?.run(this.#controller.signal)
             },
             // autorun: false => só começa a consumir depois que os schedulers estiverem registrados
-            { connection: deps.workerConnection, concurrency: 1, autorun: false },
+            { connection: deps.workerConnection, concurrency: 1, autorun: false, prefix: deps.prefix },
         )
         this.#queue.on('error', onQueueError(this.#log, 'Erro na fila de tasks'))
         this.#worker.on('error', onQueueError(this.#log, 'Erro no worker de tasks'))

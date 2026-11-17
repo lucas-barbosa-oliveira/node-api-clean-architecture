@@ -1,6 +1,8 @@
 # API Node.js — Express 5 + Clean Architecture
 
-API de exemplo com Express 5, TypeScript rodando nativamente no Node (sem build), Clean Architecture, jobs assíncronos (202 + consulta por polling), camada de background (tasks na inicialização ou agendadas), autenticação JWT com refresh token, revogação de sessões e escopos atrás do Kong Gateway, listagens com filtros/ordenação/paginação pela query string, dispositivos ESP32 pareados por código com dados em série temporal (InfluxDB 2), comunicação entre microsserviços pelo RabbitMQ (publish/subscribe e RPC) com auditoria de cada requisição, logs de conexão e reconexão de todas as dependências, MongoDB e Redis (BullMQ) opcionais.
+API de exemplo com Express 5, TypeScript rodando nativamente no Node (sem build), Clean Architecture, jobs assíncronos (202 + consulta por polling), camada de background (tasks na inicialização ou agendadas), autenticação JWT com refresh token, revogação de sessões e escopos atrás do Kong Gateway, listagens com filtros/ordenação/paginação pela query string, dispositivos ESP32 pareados por código com dados em série temporal (InfluxDB 2), comunicação entre microsserviços pelo RabbitMQ (publish/subscribe e RPC) com outbox transacional, auditoria de cada requisição, verificações de liveness/readiness, OpenTelemetry (traces e métricas), logs de conexão e reconexão de todas as dependências, CI no GitHub Actions, MongoDB e Redis (BullMQ) opcionais.
+
+[![CI](https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture/actions/workflows/ci.yml/badge.svg)](https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture/actions/workflows/ci.yml)
 
 ## Stack
 
@@ -9,7 +11,9 @@ API de exemplo com Express 5, TypeScript rodando nativamente no Node (sem build)
 - Autenticação: JWT RS256 com `jose`, refresh token opaco com rotação, senhas com `scrypt` (nativo do Node), Kong Gateway 3.9 (DB-less)
 - Query string: `query-strings-parser`
 - Séries temporais: InfluxDB 2.7 com `@influxdata/influxdb-client`
-- Barramento: RabbitMQ 4.1 com `amqp-client-node` (publish/subscribe e RPC)
+- Barramento: RabbitMQ 4.1 com `amqplib` (publish/subscribe e RPC, compatível com serviços que usam a `amqp-client-node`), com outbox transacional no MongoDB (replica set)
+- Observabilidade: OpenTelemetry (traces para o Jaeger, métricas no formato Prometheus), logs com `trace_id`
+- CI: GitHub Actions (lint, typecheck, testes, integração e teste de fumaça da imagem) e Dependabot
 - Documentação: OpenAPI 3.1 gerado a partir dos schemas zod, com Swagger UI (`swagger-ui-dist`) em `/reference`
 - Testes: `node:test` + supertest
 
@@ -87,11 +91,11 @@ O [Dockerfile](Dockerfile) não tem etapa de build: o Node executa os `.ts` de `
 
 - **Duas etapas:** uma instala só as dependências de produção (`npm ci --omit=dev`), a final copia `node_modules`, `package.json` e `src/`. Imagem de ~200 MB em `node:24-alpine`.
 - **Fora da imagem:** `.env*`, `keys/`, testes e configurações de lint (veja [.dockerignore](.dockerignore)). As variáveis vêm do `.env.docker` via `env_file`, com os hosts trocados pelos nomes dos serviços (`mongo`, `redis`, `influxdb`); as chaves JWT entram por volume somente leitura.
-- **Execução:** usuário `node` (sem root), sistema de arquivos somente leitura, `HEALTHCHECK` em `/health` e `CMD ["node", ...]` sem `npm` na frente, para o SIGTERM do `docker stop` chegar ao Node e o encerramento ser gracioso.
+- **Execução:** usuário `node` (sem root), sistema de arquivos somente leitura, `HEALTHCHECK` em `/health/live` e `CMD ["node", ...]` sem `npm` na frente, para o SIGTERM do `docker stop` chegar ao Node e o encerramento ser gracioso.
 - **Porta:** a API não é publicada no host; todo acesso passa pelo Kong. Para chamar direto, descomente `ports` no serviço `api` do `docker-compose.yml`.
 - **Escala:** `docker compose up -d --scale api=3` sobe três instâncias; o Kong distribui entre elas pelo DNS do Docker, e os jobs e tasks agendadas continuam coordenados pelo Redis.
 
-Testes com as dependências reais (inclui integração com BullMQ, InfluxDB e RabbitMQ):
+Testes com as dependências reais (inclui integração com BullMQ, InfluxDB, RabbitMQ e o outbox transacional). Eles usam banco e fila próprios (`app_test`, prefixo `bull-app_test`), sem misturar com os dados da API de desenvolvimento, mesmo com ela rodando ao lado:
 
 ```bash
 npm run test:docker
@@ -105,6 +109,8 @@ docker compose exec redis redis-cli        # KEYS bull:*
 curl -s localhost:8001/routes | node -pe "JSON.parse(require('fs').readFileSync(0)).data.map(r=>r.name)"  # rotas no Kong
 docker compose logs -f kong                # logs de acesso do gateway
 # RabbitMQ: interface web em http://localhost:15672 (app / app-rabbit-local)
+# Jaeger (traces): http://localhost:16686 | métricas da API: http://localhost:9464/metrics
+# Prometheus (opcional): docker compose --profile metrics up -d prometheus -> http://localhost:9090
 # InfluxDB: interface web em http://localhost:8086 (admin / admin-influx-local), bucket "sensors"
 docker compose exec influxdb influx query --org app --token dev-influx-token-local \
   'from(bucket:"sensors") |> range(start:-1d) |> filter(fn:(r)=> r._measurement=="passage")'
@@ -145,7 +151,7 @@ A API valida o token mesmo atrás do Kong (*zero trust*): quem chegar direto na 
 
 | Rota | Acesso |
 |---|---|
-| `GET /health`, `GET /.well-known/jwks.json` | pública |
+| `GET /health`, `/health/live`, `/health/ready`, `GET /.well-known/jwks.json` | pública |
 | `POST /auth/login` | pública. `{ email, password }` → `{ access_token, token_type, expires_in, refresh_token, refresh_expires_in }` |
 | `POST /auth/refresh` | pública. `{ refresh_token }` → novo par de tokens (o refresh token antigo deixa de valer) |
 | `POST /auth/logout` | autenticado: encerra a sessão do token (204) |
@@ -318,8 +324,9 @@ api-clean-architecture @ 2026-11-17T14:14:26.482Z info: [rabbitmq] Evento Reques
 
 - **Nível e formato:** `LOG_LEVEL` (`silent`, `error`, `warn`, `info`, `debug`) e `LOG_FORMAT` (`text` ou `json`, uma linha JSON por log para Loki, ELK ou CloudWatch). As cores só aparecem em terminal; `NO_COLOR` desliga e `FORCE_COLOR` liga.
 - **Implementação:** a aplicação depende da porta `ILogger` (`application/port/logger.ts`); a implementação é `infrastructure/logger/console.logger.ts`, sem dependências. Trocar por winston ou pino é escrever outro adaptador.
-- **Requisições:** uma linha por requisição no formato *combined* com o tempo de resposta. `/health` (chamado pelo Docker a cada 10 s) só aparece em `debug`.
+- **Requisições:** uma linha por requisição no formato *combined* com o tempo de resposta. `/health` e `/health/*` (chamados pelo Docker e pelo balanceador) só aparecem em `debug`.
 - **Erros não tratados:** saem com o stack e o `request_id`.
+- **Correlação com traces:** com o OpenTelemetry ligado, cada linha registrada dentro de uma requisição ou mensagem termina com `trace_id=...`, o id para buscar o trace no Jaeger (em JSON, campos `trace_id` e `span_id`).
 
 ### Conexões e reconexões
 
@@ -330,28 +337,56 @@ api-clean-architecture @ 2026-11-17T14:14:26.482Z info: [rabbitmq] Evento Reques
 | InfluxDB | Não bloqueia: um `GET /ping` periódico registra a conexão | Mesmo `ping` (a cada 15 s; 5 s enquanto fora do ar) registra queda, tentativas e retorno; falhas de gravação também viram log |
 | RabbitMQ | Não bloqueia: conecta em segundo plano e registra cada tentativa com o motivo (recusa, credenciais, vhost) | A biblioteca reconecta para sempre e refaz exchanges, filas e consumidores; registra queda, tentativas e retorno por conexão (publish, subscribe, RPC server, RPC client) |
 
-Um `docker stop` durante as tentativas de conexão encerra a aplicação na hora. No encerramento normal, cada etapa é registrada: servidor HTTP, filas, barramento (com envio do que estiver no buffer), InfluxDB e MongoDB.
+Um `docker stop` durante as tentativas de conexão encerra a aplicação na hora. No encerramento normal, a instância deixa de estar pronta (`/health/ready` responde 503) e cada etapa é registrada: servidor HTTP, filas, relay do outbox, barramento, InfluxDB e MongoDB.
 
 ## Barramento de eventos (RabbitMQ)
 
-Comunicação com outros microsserviços pela biblioteca [`amqp-client-node`](https://github.com/nutes-uepb/amqp-client-node), atrás da porta `IEventBus` (`application/port/event.bus.ts`). Com `EVENT_BUS_DRIVER=memory` (padrão fora do Docker), um barramento dentro do processo faz o mesmo papel, sem RabbitMQ.
+Comunicação com outros microsserviços pelo `amqplib`, atrás da porta `IEventBus` (`application/port/event.bus.ts`). Com `EVENT_BUS_DRIVER=memory` (padrão fora do Docker), um barramento dentro do processo faz o mesmo papel, sem RabbitMQ.
 
 | Papel | Onde | Detalhes |
 |---|---|---|
-| Publicar | `eventBus.publish(exchange, routingKey, event)` | Exchange `topic` durável. Com o RabbitMQ fora do ar, os eventos ficam em um buffer em memória (até `EVENT_BUS_BUFFER_SIZE`; acima disso, os mais antigos são descartados com log) e são enviados quando a conexão volta |
-| Assinar | `presentation/eventbus/subscribers.ts` | Cada subscriber declara `eventName`, `exchange` e `routingKey` (aceita `*` e `#`) e chama um service. Todos usam a fila durável `<APP_NAME>`. A mensagem é confirmada (ack) depois do processamento; se o handler falhar, é descartada com log, sem voltar à fila |
+| Publicar | Services gravam no outbox (`IOutbox`); o relay chama `eventBus.publish` | Exchange `topic` durável, mensagem persistente e confirmação do broker (*publisher confirms*): só conta como enviada quando o RabbitMQ aceitou |
+| Assinar | `presentation/eventbus/subscribers.ts` | Cada subscriber declara `eventName`, `exchange` e `routingKey` (aceita `*` e `#`) e chama um service. Todos usam a fila durável `<APP_NAME>`. Confirmação (ack) depois do processamento; se o handler falhar, a mensagem é descartada com log, sem voltar à fila |
 | Oferecer RPC | `presentation/eventbus/rpc.resources.ts` | Exchange `direct` `<APP_NAME>.rpc`. Recursos: `users.find(query)`, `users.findone(id)` e `jobs.find(query)`. As consultas aceitam a mesma query string das rotas, validada pelo mesmo schema |
-| Chamar RPC | `eventBus.executeResource(servico, recurso, ...params)` | Chama `<servico>.rpc`; falha após `RABBITMQ_RPC_TIMEOUT_MS` ou com o barramento fora do ar |
+| Chamar RPC | `eventBus.executeResource(servico, recurso, ...params)` | Chama `<servico>.rpc` por *direct reply-to*. Recurso inexistente falha na hora (mensagem devolvida pelo broker); sem resposta, falha após `RABBITMQ_RPC_TIMEOUT_MS` |
 
 Exemplo de outro serviço chamando esta API: `executeResource('api-clean-architecture', 'users.find', '?role=client&fields=name,email')`. Erros (ex.: query string inválida ou usuário inexistente) voltam como erro para quem chamou, em vez de virar *timeout*.
 
-- **Uma conexão por papel:** são quatro conexões (publish, subscribe, RPC server e RPC client), como nos outros serviços. Assim, um consumidor lento não atrasa as publicações.
-- **Mensagens do próprio processo:** a biblioteca ignora no subscribe o que foi publicado por este mesmo processo (`receiveFromYourself: false`).
+- **Compatível com a `amqp-client-node`.** Usa o mesmo formato de mensagem (JSON), a mesma convenção de RPC (`{ resource_name, handle }` e `type: "error"` nas falhas) e os mesmos argumentos de fila. O teste de integração `test/integration/rabbitmq.test.ts` usa a biblioteca dos serviços antigos para provar as duas direções.
+- **Duas conexões, como recomenda o RabbitMQ:** `publish` (publicação e RPC client) e `consume` (subscribers e servidor RPC). Assim, um consumidor lento não atrasa as publicações.
+- **Reconexão:** a reconexão é própria, para sempre, com espera que dobra até 15 s. Cada tentativa é registrada com o motivo real (recusa, credenciais, vhost, fila incompatível). A cada reconexão, exchanges, filas, ligações e consumidores são refeitos.
 - **Acesso por RPC:** o RPC não passa pelo Kong nem tem token. Quem alcança o RabbitMQ lê usuários e jobs, então o broker deve ficar só na rede interna dos serviços, com usuário e senha próprios.
+
+### Outbox transacional
+
+Os services nunca publicam direto no barramento: gravam o evento na coleção `outbox_events`, **na mesma transação** que o dado que mudou (`IUnitOfWork`). Um relay publica em seguida.
+
+```
+POST /users ──► transação { insert users, insert outbox_events } ──► 201
+                                         │
+                         relay (a cada evento novo ou 1 s) ──► RabbitMQ (confirmado) ──► marca como enviado
+```
+
+- **Garantias:** o evento só existe se o dado foi gravado, e nunca se perde com o RabbitMQ fora do ar ou com a API reiniciando, porque fica no banco esperando. Há novas tentativas com espera crescente, até 5 minutos.
+- **Entrega "pelo menos uma vez":** se a instância cair entre publicar e marcar como enviado, o evento sai de novo com o mesmo `messageId`. Os consumidores descartam repetidos pelo `messageId` (ou pelo `audit.id`).
+- **Várias instâncias:** cada evento é reservado por uma só (`findOneAndUpdate` atômico), sem envio duplicado.
+- **Trace contínuo:** o relay publica dentro do trace de quem gravou o evento, então requisição e publicação aparecem no mesmo trace no Jaeger.
+- **Limpeza:** eventos enviados ficam 7 dias (índice TTL) para investigação. Pendentes e idade do mais antigo aparecem em `/health/ready` e nas métricas `outbox_events_pending` e `outbox_oldest_pending_age`.
+- **Replica set obrigatório:** o MongoDB precisa ser replica set para ter transações. O compose já sobe assim (`--replSet rs0`, iniciado pelo healthcheck), e a URI usa `?directConnection=true`. Com um `mongod` avulso, a API funciona, mas avisa no log que dado e evento não serão atômicos.
+- **Implementação:** `transactionAsyncLocalStorage` do Mongoose, que repassa a sessão da transação a todas as operações do callback sem mudar nenhum repositório.
+
+Eventos publicados por este serviço:
+
+| Exchange | Routing key | Evento | Quando |
+|---|---|---|---|
+| `users` | `users.created` | `UserCreatedEvent` | Admin cadastra gestor ou cliente |
+| `devices` | `devices.paired` | `DevicePairedEvent` | ESP32 pareada |
+| `devices` | `devices.revoked` | `DeviceRevokedEvent` (`reason`: `revoked_by_user` ou `replaced_by_new_pairing`) | Cliente revoga, ou o mesmo hardware é pareado de novo |
+| `audit` | `audit.request` | `RequestAuditEvent` | Cada requisição (ver abaixo) |
 
 ### Auditoria
 
-A cada requisição (exceto `AUDIT_IGNORE_PATHS`, por padrão `/health` e `/.well-known`), a API publica um `RequestAuditEvent` na exchange `audit` com routing key `audit.request`. O serviço de auditoria assina com uma fila ligada a `audit.#`.
+A cada requisição (exceto `AUDIT_IGNORE_PATHS`, por padrão `/health`, `/.well-known` e `/reference`), a API grava no outbox e publica um `RequestAuditEvent` na exchange `audit` com routing key `audit.request`. O serviço de auditoria assina com uma fila ligada a `audit.#`.
 
 ```json
 {
@@ -382,6 +417,56 @@ A cada requisição (exceto `AUDIT_IGNORE_PATHS`, por padrão `/health` e `/.wel
 - **Duplicatas:** `audit.id` é único por evento. Após uma queda do barramento, um evento pode chegar duas vezes; o consumidor descarta pelo `id`.
 - **Desligar:** `AUDIT_ENABLED=false`.
 
+## Saúde e indisponibilidade
+
+| Rota | Pergunta | Uso |
+|---|---|---|
+| `GET /health/live` (e `/health`) | O processo está de pé? Não consulta nada | `HEALTHCHECK` do Docker / *liveness probe*: se falhar, reinicia o container |
+| `GET /health/ready` | Consegue atender? 200 ou 503, com o estado de cada dependência | Balanceador / *readiness probe*: se falhar, para de mandar tráfego, sem reiniciar |
+
+```json
+{ "status": "ready", "checks": {
+  "mongodb":  { "status": "up", "critical": true,  "latency_ms": 3, "details": { "transactions": true } },
+  "redis":    { "status": "up", "critical": true,  "latency_ms": 1, "details": { "jobs:queue": "ready", "...": "..." } },
+  "influxdb": { "status": "up", "critical": false, "latency_ms": 1 },
+  "rabbitmq": { "status": "up", "critical": false, "latency_ms": 1, "details": { "publish": true, "consume": true } },
+  "outbox":   { "status": "up", "critical": false, "latency_ms": 3, "details": { "pending": 0, "oldestAgeSeconds": 0 } } } }
+```
+
+- **Dependências críticas:** MongoDB e Redis. Fora do ar, a instância não está pronta.
+- **Não críticas:** InfluxDB, RabbitMQ e outbox aparecem no relatório sem tirar a instância do ar. Com o RabbitMQ fora, os eventos esperam no outbox. O outbox fica `down` se um evento estiver parado há mais de 5 minutos.
+- **Tempo máximo:** cada verificação tem 2 s; uma dependência travada conta como `down`.
+- **Encerramento:** no SIGTERM, a readiness passa a responder 503 antes de as conexões fecharem.
+- **Dependência fora do ar responde 503, não 500.** Banco, fila ou barramento indisponível vira `503 { "code": "UNAVAILABLE" }` com `Retry-After: 5`, registrado como `warn` sem stack. O cliente sabe que pode tentar de novo, e o 500 fica reservado para bugs. A infraestrutura reconhece os erros dos drivers (`infrastructure/resilience/unavailable.ts`); a camada HTTP não conhece nenhum driver.
+
+## Observabilidade (OpenTelemetry)
+
+Ligado quando `OTEL_EXPORTER_OTLP_ENDPOINT` está definido (já está no `.env.docker` e no compose). Carregado antes da aplicação com `node --import ./src/main/telemetry.ts` (os scripts npm e o Dockerfile já fazem isso).
+
+| Sinal | Onde ver | Conteúdo |
+|---|---|---|
+| Traces | Jaeger, `http://localhost:16686` | Kong → API → MongoDB, Redis, RabbitMQ: um trace por requisição, do gateway ao banco, incluindo a publicação feita depois pelo outbox |
+| Métricas | `http://localhost:9464/metrics` (Prometheus); Prometheus opcional em `:9090` com `docker compose --profile metrics up -d prometheus` | Latência HTTP (`http_server_request_duration`), event loop, heap, GC, conexões do Mongo, `outbox_events_pending`, `outbox_oldest_pending_age`, `outbox_events_published_total`, `jobs_completed_total`, `jobs_duration`, `passages_written_total` |
+| Logs | stdout | `trace_id` em cada linha registrada dentro de um trace |
+
+- **Instrumentação automática:** HTTP, Express, MongoDB, ioredis (BullMQ) e amqplib. O contexto do trace segue nos headers das mensagens do RabbitMQ, então um serviço que consome e também usa OpenTelemetry continua o mesmo trace.
+- **Fora dos traces:** `/health/*`, os arquivos da documentação e `/metrics` não geram trace (só ruído). Os spans do MongoDB não gravam os valores das consultas.
+- **Kong:** o plugin `opentelemetry` envia os spans do gateway ao Jaeger e passa o contexto adiante pelo header `traceparent` (W3C).
+- **Métricas de negócio:** ficam em `infrastructure/telemetry/metrics.ts`. Sem o SDK carregado (testes, modo rápido), a API do OpenTelemetry não faz nada e não custa nada.
+- **Variáveis padrão do OpenTelemetry:** `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` (amostragem em produção), `OTEL_SDK_DISABLED`.
+
+## Integração contínua
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda a cada push em `main`/`develop` e em todo pull request:
+
+| Job | O que faz |
+|---|---|
+| `quality` | `npm ci`, lint, typecheck e testes em memória |
+| `integration` | Sobe MongoDB (replica set), Redis, InfluxDB e RabbitMQ com o compose e roda `npm run test:docker` (inclui outbox transacional e compatibilidade com a `amqp-client-node`) |
+| `image` | `npm run docker:up` (build da imagem + ambiente completo) e teste de fumaça pelo Kong: readiness, documentação e login |
+
+Em falha, o job imprime os logs dos containers. Um push novo na mesma branch cancela a execução anterior. O [Dependabot](.github/dependabot.yml) abre pull requests semanais com atualizações de npm (OpenTelemetry e ESLint agrupados), actions e imagens Docker.
+
 ## Variáveis de ambiente
 
 Sem `.env` valem os padrões abaixo. Copie `.env.example` para `.env` para customizar.
@@ -409,8 +494,11 @@ Sem `.env` valem os padrões abaixo. Copie `.env.example` para `.env` para custo
 | `EVENT_BUS_DRIVER` | `memory` | `memory` ou `rabbitmq` |
 | `RABBITMQ_URI` | — | Obrigatória com `rabbitmq`, ex.: `amqp://app:app-rabbit-local@127.0.0.1:5672` |
 | `RABBITMQ_RETRY_INTERVAL_MS` / `RABBITMQ_RPC_TIMEOUT_MS` | `2000` / `5000` | Intervalo entre tentativas de reconexão / tempo máximo de uma chamada RPC |
-| `EVENT_BUS_BUFFER_SIZE` | `1000` | Eventos guardados enquanto o barramento está fora do ar |
-| `AUDIT_ENABLED` / `AUDIT_IGNORE_PATHS` / `AUDIT_MAX_BODY_BYTES` | `true` / `/health,/.well-known` / `16384` | Auditoria por requisição |
+| `QUEUE_PREFIX` | `bull` | Prefixo das chaves do BullMQ no Redis; separa ambientes no mesmo Redis (os testes usam `bull-<banco>`) |
+| `OUTBOX_POLL_INTERVAL_MS` | `1000` | Intervalo com que o relay procura eventos gravados por outras instâncias (os desta instância saem na hora) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Liga o OpenTelemetry e define para onde vão os traces (ex.: `http://127.0.0.1:4318`) |
+| `OTEL_SERVICE_NAME` / `OTEL_METRICS_PORT` | `APP_NAME` / `9464` | Nome do serviço nos traces / porta do `/metrics` |
+| `AUDIT_ENABLED` / `AUDIT_IGNORE_PATHS` / `AUDIT_MAX_BODY_BYTES` | `true` / `/health,/.well-known,/reference` / `16384` | Auditoria por requisição |
 | `API_DOCS_ENABLED` | `true` | Swagger UI e documento OpenAPI em `/reference` |
 | `KONG_UPSTREAM_URL` | `http://api:3000` | Só para `npm run kong:setup`: onde o Kong encontra a API (`docker:infra` usa `http://host.docker.internal:3000`) |
 
@@ -442,12 +530,15 @@ src/
   application/     casos de uso e portas
     service/ port/ query/ (consultas de listagem e o que cada recurso aceita)
     audit/             evento de auditoria e remoção de segredos
+    event/             eventos de integração publicados por este serviço
   infrastructure/  detalhes técnicos
     database/schema/   schemas Mongoose
     mapper/            modelo <-> JSON do Mongo (transform)
     repository/        base/ (BaseMongoRepository), mongo/, in-memory/
     queue/ redis/
-    eventbus/          RabbitMQ (amqp-client-node) e barramento em memória
+    eventbus/          RabbitMQ (amqplib, conexão com reconexão) e barramento em memória
+    outbox/            outbox (Mongo e memória) e relay que publica no barramento
+    telemetry/         métricas de negócio (OpenTelemetry)
     logger/            logger de console (texto ou JSON)
     resilience/        tentativas de conexão na inicialização
     security/          hash de senha (scrypt), JWT (jose) e refresh token
@@ -497,7 +588,11 @@ Regra de dependência: `domain` ← `application` ← (`presentation` | `backgro
 - **ESP32 recebe 401 no envio:** o dispositivo foi revogado ou pareado de novo. Pareie outra vez.
 - **`ECONNREFUSED` em 8086:** InfluxDB fora do ar; `npm run docker:up`.
 - **`ACCESS_REFUSED` ao conectar no RabbitMQ:** usuário ou senha errados em `RABBITMQ_URI`. O usuário `guest` só funciona de dentro do container; use `app` / `app-rabbit-local`. Se o volume `rabbitmq-data` foi criado com outro usuário, apague-o (`docker compose down -v`).
-- **"Barramento indisponível: eventos ficam em buffer" logo na inicialização:** é normal se uma requisição chegar antes de a conexão com o RabbitMQ abrir. O buffer é enviado em seguida (log "evento(s) do buffer enviado(s)").
+- **"Barramento indisponível: eventos ficam no outbox" logo na inicialização:** é normal se o relay rodar antes de a conexão com o RabbitMQ abrir. Os eventos saem assim que ela abre.
+- **"MongoDB sem replica set" no log:** o Mongo foi iniciado sem `--replSet` (ex.: um container antigo). Recrie com `docker compose up -d mongo` e use `?directConnection=true` na `MONGO_URI`.
+- **`/health/ready` responde 503:** veja no corpo qual dependência crítica está `down`.
+- **Nenhum trace no Jaeger:** confirme `OTEL_EXPORTER_OTLP_ENDPOINT` e que a API subiu com `--import ./src/main/telemetry.ts`. O log de inicialização mostra `[telemetry] traces para ...`.
+- **`EADDRINUSE :9464` com duas instâncias no host:** dê a cada uma um `OTEL_METRICS_PORT` diferente.
 - **Ver os logs da aplicação nos testes:** `TEST_LOG_LEVEL=info npm test`.
 - **`400` em uma listagem:** a resposta traz em `issues` o campo, operador ou valor recusado.
 - **Docker: porta já em uso:** você tem outro Mongo/Redis local; pare-o ou altere a porta em `docker-compose.yml`.
@@ -515,5 +610,7 @@ Regra de dependência: `domain` ← `application` ← (`presentation` | `backgro
 - O `INFLUX_TOKEN` local é o de administração. Em produção, crie um token só com leitura e escrita no bucket `sensors` (`influx auth create --read-bucket ... --write-bucket ...`).
 - Firmware da ESP32: use HTTPS (`WiFiClientSecure` com o certificado da CA), guarde o token no NVS (`Preferences`) e envie em lote com retentativa. Em 401, volte ao modo de pareamento.
 - RabbitMQ: troque a senha de `app`, use `amqps://` entre redes e configure uma *dead-letter exchange* na fila do serviço para guardar mensagens cujo processamento falhou (hoje são descartadas com log).
-- O buffer do barramento fica em memória: se a API for encerrada à força durante uma queda do RabbitMQ, os eventos pendentes se perdem (o encerramento normal registra quantos). Se a auditoria não puder perder nada, troque o buffer por uma tabela *outbox* no Mongo.
+- O outbox grava um documento por requisição auditada. Com muito tráfego, acompanhe o tamanho de `outbox_events` (enviados expiram em 7 dias) ou envie a auditoria por um caminho próprio.
+- Em produção, configure a amostragem de traces (`OTEL_TRACES_SAMPLER=parentbased_traceidratio`, `OTEL_TRACES_SAMPLER_ARG=0.1`) e aponte `OTEL_EXPORTER_OTLP_ENDPOINT` para um OpenTelemetry Collector.
+- Use `/health/ready` como *readiness probe* e `/health/live` como *liveness probe* (Kubernetes) ou nos health checks ativos do balanceador.
 - Em produção, gerencie índices do Mongo por migração em vez de depender de `autoIndex`; adicione autenticação ao Mongo/Redis (o compose local não tem).

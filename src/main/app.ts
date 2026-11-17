@@ -8,6 +8,7 @@ import { authRoutes } from '../presentation/http/auth.routes.ts'
 import { deviceController } from '../presentation/http/device.controller.ts'
 import { deviceRoutes } from '../presentation/http/device.routes.ts'
 import { errorHandler } from '../presentation/http/error.handler.ts'
+import { healthRoutes } from '../presentation/http/health.routes.ts'
 import { jobController } from '../presentation/http/job.controller.ts'
 import { jobRoutes } from '../presentation/http/job.routes.ts'
 import { passageController } from '../presentation/http/passage.controller.ts'
@@ -30,9 +31,7 @@ export function createApp(container: Container) {
     // antes do express.json: corpo malformado (400) também é auditado
     if (container.audit) app.use(audit(container.audit.service, { ignorePaths: container.audit.ignorePaths }))
     app.use(express.json({ limit: '100kb' }))
-    app.get('/health', (_req, res) => {
-        res.json({ status: 'ok' })
-    })
+    app.use(healthRoutes(container.health))
     if (container.apiDocs) app.use(docsRoutes(buildOpenApiDocument({ title: container.apiDocs.title, version: APP_VERSION })))
     const guards = authGuards(container.authService)
     app.use(authRoutes(authController(container.authService), guards))
@@ -40,6 +39,6 @@ export function createApp(container: Container) {
     app.use(jobRoutes(jobController(container.jobService), guards))
     app.use(deviceRoutes(deviceController(container.deviceService), guards))
     app.use(passageRoutes(passageController(container.passageService), guards))
-    app.use(errorHandler(container.logger.child('http')))
+    app.use(errorHandler(container.logger.child('http'), { isUnavailable: container.isDependencyUnavailable }))
     return app
 }

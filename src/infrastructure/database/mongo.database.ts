@@ -4,11 +4,13 @@ import { redactUri, retryUntilConnected } from '../resilience/retry.ts'
 import {
     deviceSchema,
     jobSchema,
+    outboxEventSchema,
     pairingCodeSchema,
     sessionSchema,
     userSchema,
     type IDeviceModel,
     type IJobModel,
+    type IOutboxEventModel,
     type IPairingCodeModel,
     type ISessionModel,
     type IUserModel,
@@ -18,6 +20,9 @@ import {
  * Abre uma conexão própria (sem estado global) e compila os models a partir dos schemas.
  * Na inicialização tenta até conseguir; depois disso o driver reconecta sozinho e os eventos viram logs.
  */
+// com isto, connection.transaction() repassa a sessão a todas as operações do callback (sem passar { session } à mão)
+mongoose.set('transactionAsyncLocalStorage', true)
+
 export async function connectMongo(uri: string, dbName: string, deps: { logger: ILogger; signal?: AbortSignal }) {
     const log = deps.logger
     log.info(`Conectando ao MongoDB em ${redactUri(uri)} (banco "${dbName}")...`)
@@ -44,6 +49,7 @@ export async function connectMongo(uri: string, dbName: string, deps: { logger: 
         Session: connection.model<ISessionModel>('Session', sessionSchema),
         Device: connection.model<IDeviceModel>('Device', deviceSchema),
         PairingCode: connection.model<IPairingCodeModel>('PairingCode', pairingCodeSchema),
+        OutboxEvent: connection.model<IOutboxEventModel>('OutboxEvent', outboxEventSchema),
     }
 
     // O Mongoose já chama init() ao criar o model; aguardar garante os índices antes de atender requisições.
@@ -51,8 +57,20 @@ export async function connectMongo(uri: string, dbName: string, deps: { logger: 
 
     log.info(`Models e índices prontos: ${Object.keys(models).join(', ')}`)
 
+    // transações (outbox junto com o dado) exigem replica set; um mongod avulso funciona, mas sem atomicidade
+    const hello = await connection.db?.admin().command({ hello: 1 })
+    const supportsTransactions = Boolean(hello?.setName)
+    if (supportsTransactions) log.info(`Replica set "${hello?.setName}": transações habilitadas`)
+    else log.warn('MongoDB sem replica set: dado e evento do outbox não serão gravados atomicamente (use --replSet)')
+
     return {
         models,
+        connection,
+        supportsTransactions,
+        /** Verificação do /health/ready: o servidor responde a um ping. */
+        ping: async () => {
+            await connection.db?.admin().ping()
+        },
         close: async () => {
             watcher.closing = true
             await connection.close()

@@ -1,24 +1,24 @@
-import { amqpClient, type IConnection, type IMessage } from 'amqp-client-node'
-import { connect as amqpConnect } from 'amqplib'
-import type { EventSubscription, IEventBus, IntegrationEvent, RpcResource } from '../../application/port/event.bus.ts'
+import { randomUUID } from 'node:crypto'
+import type { Channel, ChannelModel, ConfirmChannel, ConsumeMessage, Message } from 'amqplib'
+import type {
+    EventSubscription,
+    IEventBus,
+    IntegrationEvent,
+    PublishOptions,
+    RpcResource,
+} from '../../application/port/event.bus.ts'
+import { EventBusUnavailableError } from '../../application/port/event.bus.ts'
 import { silentLogger, type ILogger } from '../../application/port/logger.ts'
-import { formatMs, redactUri, retryUntilConnected } from '../resilience/retry.ts'
+import { redactUri } from '../resilience/retry.ts'
+import { ManagedConnection } from './managed.connection.ts'
 import { topicMatches } from './topic.ts'
 
-/** Uma conexão por papel, como nos outros serviços: publicar não disputa canal com consumir ou responder RPC. */
-const ROLES = {
-    publish: 'publish',
-    subscribe: 'subscribe',
-    rpcServer: 'RPC server',
-    rpcClient: 'RPC client',
-} as const
-type Role = keyof typeof ROLES
-
-const TOPIC_EXCHANGE = { type: 'topic', durable: true }
-const RPC_EXCHANGE = { type: 'direct', durable: true }
+const DURABLE_EXCHANGE = { durable: true } as const
+/** Mesmos argumentos da amqp-client-node: declarar a mesma fila com outros argumentos daria PRECONDITION_FAILED. */
+const RPC_QUEUE = { durable: false, expires: 5000 } as const
+const SERVICE_QUEUE = { durable: true } as const
+const DIRECT_REPLY_TO = 'amq.rabbitmq.reply-to'
 const PUBLISH_TIMEOUT_MS = 10_000
-
-type Buffered = { exchange: string; routingKey: string; event: IntegrationEvent }
 
 export type RabbitMqEventBusOptions = {
     /** amqp://usuario:senha@host:5672/vhost */
@@ -26,38 +26,44 @@ export type RabbitMqEventBusOptions = {
     /** Nome deste serviço: fila dos subscribers (<service>) e exchange/fila do servidor RPC (<service>.rpc). */
     service: string;
     logger?: ILogger;
-    /** Intervalo entre tentativas de (re)conexão. */
     retryIntervalMs?: number;
     rpcTimeoutMs?: number;
-    /** Eventos guardados enquanto o barramento está fora do ar; acima disso, os mais antigos são descartados. */
-    bufferSize?: number;
+    /** Mensagens entregues e ainda não confirmadas por consumidor (controle de vazão). */
+    prefetch?: number;
+}
+
+type PendingCall = {
+    timer: NodeJS.Timeout;
+    label: string;
+    resolve(value: unknown): void;
+    reject(err: Error): void;
 }
 
 /**
- * Barramento RabbitMQ com a biblioteca amqp-client-node (publish/subscribe em exchanges topic e RPC em exchange direct).
+ * Barramento RabbitMQ com o amqplib (publish/subscribe em exchanges topic e RPC em exchange direct).
  *
- * Conexão:
- *  - na inicialização, cada tentativa é feita com o amqplib (para o log trazer o motivo real da falha:
- *    recusa de conexão, credenciais, vhost); quando responde, as conexões da biblioteca são abertas;
- *  - depois, a própria biblioteca reconecta para sempre (retries: 0) e refaz exchanges, filas e consumidores;
- *    os eventos disconnected/trying/reestablished de cada conexão viram logs.
+ * Compatível com os serviços que usam a amqp-client-node: mesmo formato de mensagem (JSON), mesma convenção de RPC
+ * ({ resource_name, handle }, resposta por direct reply-to e type "error" nas falhas) e mesmos argumentos de filas.
+ *
+ * Duas conexões (recomendação do RabbitMQ: quem publica não divide conexão com quem consome):
+ *  - publish: canal com confirmação do broker (publish só resolve quando o RabbitMQ aceitou) e canal de RPC client;
+ *  - consume: canal dos subscribers (fila <service>) e canal do servidor RPC (fila <service>.rpc).
  */
 export class RabbitMqEventBus implements IEventBus {
     #options: Required<Omit<RabbitMqEventBusOptions, 'logger'>>
     #log: ILogger
-    #connections: Partial<Record<Role, IConnection>> = {}
-    #up: Partial<Record<Role, boolean>> = {}
+    #instanceId = randomUUID()
+    #publisher: ManagedConnection
+    #consumer: ManagedConnection
+    #confirmChannel?: ConfirmChannel
+    #rpcClientChannel?: Channel
+    #subscriptionChannel?: Channel
+    #rpcServerChannel?: Channel
+    #declaredExchanges = new Set<string>()
     #subscriptions: EventSubscription[] = []
-    #appliedSubscriptions = new Set<EventSubscription>()
     #resources = new Map<string, RpcResource>()
-    #rpcServer?: ReturnType<IConnection['createRpcServer']>
-    #buffer: Buffered[] = []
-    #dropped = 0
-    #flushing = false
-    #closing = false
-    #abort = new AbortController()
+    #pendingCalls = new Map<string, PendingCall>()
     #started = false
-    #handled = new WeakSet<IMessage>()
 
     constructor(options: RabbitMqEventBusOptions) {
         this.#log = options.logger ?? silentLogger
@@ -66,262 +72,297 @@ export class RabbitMqEventBus implements IEventBus {
             service: options.service,
             retryIntervalMs: options.retryIntervalMs ?? 2000,
             rpcTimeoutMs: options.rpcTimeoutMs ?? 5000,
-            bufferSize: options.bufferSize ?? 1000,
+            prefetch: options.prefetch ?? 20,
         }
+        const common = {
+            service: this.#options.service,
+            uri: this.#options.uri,
+            logger: this.#log,
+            retryIntervalMs: this.#options.retryIntervalMs,
+        }
+        this.#publisher = new ManagedConnection({
+            ...common,
+            name: 'publish',
+            setup: connection => this.#setupPublisher(connection),
+            onLost: () => this.#rejectPendingCalls('conexão com o RabbitMQ perdida'),
+        })
+        this.#consumer = new ManagedConnection({
+            ...common,
+            name: 'consume',
+            setup: connection => this.#setupConsumer(connection),
+        })
     }
 
     public get isConnected(): boolean {
-        return Boolean(this.#up.publish)
+        return this.#publisher.isUp && Boolean(this.#confirmChannel)
+    }
+
+    public status(): Record<string, boolean> {
+        return { publish: this.#publisher.isUp, consume: this.#consumer.isUp }
     }
 
     public start(): void {
         if (this.#started) return
         this.#started = true
-        this.#connect().catch(err => {
-            if (!this.#closing) this.#log.error('Falha ao configurar o barramento', { err })
-        })
+        this.#log.info(`Conectando ao RabbitMQ em ${redactUri(this.#options.uri)}...`)
+        this.#publisher.start()
+        this.#consumer.start()
     }
 
-    public async publish(exchange: string, routingKey: string, event: IntegrationEvent): Promise<void> {
-        if (!this.#up.publish || this.#flushing) {
-            this.#enqueue({ exchange, routingKey, event })
-            return
-        }
-        try {
-            await this.#send({ exchange, routingKey, event })
-        } catch (err) {
-            this.#log.warn(`Falha ao publicar ${event.event_name}: ${(err as Error).message}. Evento mantido no buffer`)
-            this.#enqueue({ exchange, routingKey, event })
-        }
+    public async publish(
+        exchange: string,
+        routingKey: string,
+        event: IntegrationEvent,
+        options: PublishOptions = {},
+    ): Promise<void> {
+        const channel = this.#confirmChannel
+        if (!channel || !this.#publisher.isUp) throw new EventBusUnavailableError()
+        await this.#declareTopic(channel, exchange)
+        await new Promise<void>((resolve, reject) => {
+            const timeout = new Error(`sem confirmação do RabbitMQ em ${PUBLISH_TIMEOUT_MS} ms`)
+            const timer = setTimeout(() => reject(timeout), PUBLISH_TIMEOUT_MS)
+            channel.publish(exchange, routingKey, Buffer.from(JSON.stringify(event)), {
+                contentType: 'application/json',
+                persistent: true, // sobrevive a um reinício do RabbitMQ (em fila durável)
+                messageId: options.messageId,
+                timestamp: Math.floor(Date.now() / 1000),
+                appId: this.#options.service,
+                correlationId: this.#instanceId, // a amqp-client-node usa para ignorar as próprias mensagens
+                type: event.event_name,
+            }, err => {
+                clearTimeout(timer)
+                if (err) reject(err instanceof Error ? err : new Error('mensagem recusada pelo RabbitMQ (nack)'))
+                else resolve()
+            })
+        })
+        this.#log.info(`Evento ${event.event_name} publicado em ${exchange} (${routingKey})`)
     }
 
     public subscribe(subscription: EventSubscription): void {
         this.#subscriptions.push(subscription)
-        if (this.#up.subscribe) void this.#applySubscription(subscription)
+        const channel = this.#subscriptionChannel
+        if (channel) {
+            void this.#bind(channel, subscription)
+                .catch(err => this.#log.error(`Falha ao configurar ${subscription.eventName}`, { err }))
+        }
     }
 
     public provideResource(resource: RpcResource): void {
         this.#resources.set(resource.name, resource)
-        if (this.#rpcServer) void this.#registerResource(resource).then(() => this.#rpcServer?.start())
+        const channel = this.#rpcServerChannel
+        if (channel) {
+            void channel.bindQueue(this.#rpcName, this.#rpcName, resource.name)
+                .then(() => this.#log.info(`Recurso RPC ${resource.name} registrado`))
+                .catch(err => this.#log.error(`Falha ao registrar o recurso RPC ${resource.name}`, { err }))
+        }
     }
 
     public async executeResource(service: string, resource: string, ...params: unknown[]): Promise<unknown> {
-        const connection = this.#connections.rpcClient
-        if (!connection || !this.#up.rpcClient) {
-            throw new Error('Barramento indisponível: não foi possível chamar o recurso RPC')
+        const channel = this.#rpcClientChannel
+        if (!channel || !this.#publisher.isUp) {
+            throw new EventBusUnavailableError('Barramento indisponível: não foi possível chamar o recurso RPC')
         }
-        this.#log.debug(`Chamando recurso RPC ${service}/${resource}`)
-        return connection.rpcClient(`${service}.rpc`, resource, params, {
-            exchange: RPC_EXCHANGE,
-            rpcTimeout: this.#options.rpcTimeoutMs,
+        const exchange = `${service}.rpc`
+        if (!this.#declaredExchanges.has(exchange)) {
+            await channel.assertExchange(exchange, 'direct', DURABLE_EXCHANGE)
+            this.#declaredExchanges.add(exchange)
+        }
+        const correlationId = randomUUID()
+        const label = `${service}/${resource}`
+        const timeoutMs = this.#options.rpcTimeoutMs
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                this.#pendingCalls.delete(correlationId)
+                reject(new Error(`RPC ${label}: sem resposta em ${timeoutMs} ms`))
+            }, timeoutMs)
+            this.#pendingCalls.set(correlationId, { resolve, reject, timer, label })
+            this.#log.debug(`Chamando recurso RPC ${label}`)
+            channel.publish(exchange, resource, Buffer.from(JSON.stringify({ resource_name: resource, handle: params })), {
+                contentType: 'application/json',
+                correlationId,
+                replyTo: DIRECT_REPLY_TO,
+                // sem fila ligada a esse recurso, o broker devolve a mensagem (evento "return") em vez de descartar
+                mandatory: true,
+                expiration: String(timeoutMs), // pedido não atendido a tempo não fica na fila
+            })
         })
     }
 
     public async close(): Promise<void> {
-        this.#closing = true
-        this.#abort.abort(new Error('barramento encerrado'))
-        if (this.#up.publish && this.#buffer.length > 0) await this.#flush()
-        if (this.#buffer.length > 0) {
-            this.#log.warn(`${this.#buffer.length} evento(s) do buffer não enviados: barramento indisponível no encerramento`)
-        }
-        await Promise.allSettled(Object.values(this.#connections).map(connection => connection.close()))
-        if (Object.keys(this.#connections).length > 0) this.#log.info('Conexões com RabbitMQ encerradas')
+        this.#rejectPendingCalls('barramento encerrado')
+        await Promise.all([this.#publisher.close(), this.#consumer.close()])
+        if (this.#started) this.#log.info('Conexões com RabbitMQ encerradas')
     }
 
-    async #connect(): Promise<void> {
-        const { uri, retryIntervalMs } = this.#options
-        this.#log.info(`Conectando ao RabbitMQ em ${redactUri(uri)}...`)
-        await retryUntilConnected(async () => {
-            const probe = await amqpConnect(uri, { timeout: 5000 })
-            await probe.close()
-        }, {
-            name: 'RabbitMQ',
-            logger: this.#log,
-            initialDelayMs: retryIntervalMs,
-            maxDelayMs: 15_000,
-            signal: this.#abort.signal,
+    get #rpcName(): string {
+        return `${this.#options.service}.rpc`
+    }
+
+    async #setupPublisher(connection: ChannelModel): Promise<void> {
+        this.#declaredExchanges.clear()
+        this.#confirmChannel = undefined
+        this.#rpcClientChannel = undefined
+
+        const confirm = await connection.createConfirmChannel()
+        confirm.on('error', (err: Error) => this.#log.error(`Erro no canal de publicação: ${err.message}`))
+        confirm.on('close', () => {
+            if (this.#confirmChannel === confirm) this.#confirmChannel = undefined
         })
 
-        await Promise.all((Object.keys(ROLES) as Role[]).map(role => this.#open(role)))
-        if (this.#closing) return
+        const rpc = await connection.createChannel()
+        rpc.on('error', (err: Error) => this.#log.error(`Erro no canal de RPC client: ${err.message}`))
+        rpc.on('return', (message: Message) => this.#settle(
+            message.properties.correlationId,
+            new Error(`Recurso RPC indisponível: ninguém oferece "${message.fields.routingKey}" em ${message.fields.exchange}`),
+        ))
+        // direct reply-to: a resposta chega no mesmo canal que publicou o pedido, sem fila temporária
+        await rpc.consume(DIRECT_REPLY_TO, message => {
+            if (message) this.#onRpcReply(message)
+        }, { noAck: true })
 
-        await this.#startRpcServer()
-        await Promise.all(this.#subscriptions.map(subscription => this.#applySubscription(subscription)))
+        this.#confirmChannel = confirm
+        this.#rpcClientChannel = rpc
+    }
+
+    async #setupConsumer(connection: ChannelModel): Promise<void> {
+        this.#subscriptionChannel = undefined
+        this.#rpcServerChannel = undefined
+        const { service, prefetch } = this.#options
+
+        const subscriptions = await connection.createChannel()
+        subscriptions.on('error', (err: Error) => this.#log.error(`Erro no canal de subscribers: ${err.message}`))
+        await subscriptions.prefetch(prefetch)
+        await subscriptions.assertQueue(service, SERVICE_QUEUE)
+        for (const subscription of this.#subscriptions) await this.#bind(subscriptions, subscription)
+        await subscriptions.consume(service, message => {
+            if (message) void this.#onEvent(subscriptions, message)
+        }, { noAck: false })
         if (this.#subscriptions.length === 0) this.#log.info('Nenhum subscriber configurado')
-        if (this.#buffer.length > 0) await this.#flush()
+
+        const rpc = await connection.createChannel()
+        rpc.on('error', (err: Error) => this.#log.error(`Erro no canal do servidor RPC: ${err.message}`))
+        await rpc.prefetch(prefetch)
+        await rpc.assertExchange(this.#rpcName, 'direct', DURABLE_EXCHANGE)
+        await rpc.assertQueue(this.#rpcName, RPC_QUEUE)
+        for (const name of this.#resources.keys()) {
+            await rpc.bindQueue(this.#rpcName, this.#rpcName, name)
+            this.#log.info(`Recurso RPC ${name} registrado`)
+        }
+        await rpc.consume(this.#rpcName, message => {
+            if (message) void this.#onRpcRequest(rpc, message)
+        }, { noAck: false })
+        if (this.#resources.size > 0) {
+            this.#log.info(`Servidor RPC pronto (exchange "${this.#rpcName}", ${this.#resources.size} recurso(s))`)
+        }
+
+        this.#subscriptionChannel = subscriptions
+        this.#rpcServerChannel = rpc
     }
 
-    async #open(role: Role): Promise<void> {
-        const connection = await amqpClient.createConnection(this.#options.uri, {
-            retries: 0, // a biblioteca tenta reconectar para sempre
-            interval: this.#options.retryIntervalMs,
-        })
-        this.#connections[role] = connection
-        this.#up[role] = true
-        this.#log.info(`Conexão RabbitMQ (${ROLES[role]}) estabelecida`)
-
-        let attempts = 0
-        connection.on('disconnected', () => {
-            if (this.#closing) return
-            this.#up[role] = false
-            attempts = 0
-            this.#log.warn(`Conexão RabbitMQ (${ROLES[role]}) perdida. Tentando reconectar...`)
-        })
-        connection.on('trying', () => {
-            if (this.#closing) return
-            attempts++
-            const interval = formatMs(this.#options.retryIntervalMs)
-            this.#log.warn(`Tentativa ${attempts} de reconexão RabbitMQ (${ROLES[role]}) falhou. Nova tentativa em ${interval}`)
-        })
-        connection.on('reestablished', () => {
-            this.#up[role] = true
-            this.#log.info(`Conexão RabbitMQ (${ROLES[role]}) restabelecida`)
-            if (role === 'publish' && this.#buffer.length > 0) void this.#flush()
-        })
+    async #declareTopic(channel: Channel, exchange: string): Promise<void> {
+        if (this.#declaredExchanges.has(exchange)) return
+        await channel.assertExchange(exchange, 'topic', DURABLE_EXCHANGE)
+        this.#declaredExchanges.add(exchange)
     }
 
-    async #send(item: Buffered): Promise<void> {
-        const connection = this.#connections.publish
-        if (!connection) throw new Error('sem conexão de publicação')
-        let timer: NodeJS.Timeout | undefined
-        const timeout = new Promise<never>((_resolve, reject) => {
-            const message = `sem confirmação em ${formatMs(PUBLISH_TIMEOUT_MS)}`
-            timer = setTimeout(() => reject(new Error(message)), PUBLISH_TIMEOUT_MS)
-        })
+    async #bind(channel: Channel, subscription: EventSubscription): Promise<void> {
+        await channel.assertExchange(subscription.exchange, 'topic', DURABLE_EXCHANGE)
+        await channel.bindQueue(this.#options.service, subscription.exchange, subscription.routingKey)
+        this.#log.info(
+            `Subscriber ${subscription.eventName} configurado (exchange "${subscription.exchange}", `
+            + `routing key "${subscription.routingKey}", fila "${this.#options.service}")`,
+        )
+    }
+
+    /** Cada mensagem vai para os subscribers da exchange e routing key (e do event_name, se houver) e é confirmada uma vez. */
+    async #onEvent(channel: Channel, message: ConsumeMessage): Promise<void> {
+        const { exchange, routingKey } = message.fields
+        let event: IntegrationEvent
         try {
-            await Promise.race([
-                connection.pub(item.exchange, item.routingKey, { content: item.event }, { exchange: TOPIC_EXCHANGE }),
-                timeout,
-            ])
-        } finally {
-            clearTimeout(timer)
+            event = JSON.parse(message.content.toString()) as IntegrationEvent
+        } catch {
+            this.#log.warn(`Mensagem de ${exchange} (${routingKey}) não é JSON: descartada`)
+            channel.nack(message, false, false)
+            return
         }
-        this.#log.info(`Evento ${item.event.event_name} publicado em ${item.exchange} (${item.routingKey})`)
-    }
-
-    #enqueue(item: Buffered): void {
-        if (this.#buffer.length === 0 && !this.#flushing) {
-            const max = this.#options.bufferSize
-            this.#log.warn(`Barramento indisponível: eventos ficam em buffer (até ${max}) até a conexão voltar`)
-        }
-        this.#buffer.push(item)
-        if (this.#buffer.length > this.#options.bufferSize) {
-            this.#buffer.shift()
-            this.#dropped++
-            if (this.#dropped === 1 || this.#dropped % 100 === 0) {
-                this.#log.error(`Buffer do barramento cheio: ${this.#dropped} evento(s) mais antigo(s) descartado(s)`)
-            }
-        }
-    }
-
-    /** Envia o buffer em ordem. Se a conexão cair no meio, o que sobrou continua no buffer. */
-    async #flush(): Promise<void> {
-        if (this.#flushing) return
-        this.#flushing = true
-        let sent = 0
-        try {
-            while (this.#buffer.length > 0 && this.#up.publish) {
-                await this.#send(this.#buffer[0])
-                this.#buffer.shift()
-                sent++
-            }
-        } catch (err) {
-            this.#log.warn(`Envio do buffer interrompido: ${(err as Error).message}`)
-        } finally {
-            this.#flushing = false
-        }
-        if (sent > 0) this.#log.info(`${sent} evento(s) do buffer enviado(s); ${this.#buffer.length} pendente(s)`)
-        if (this.#dropped > 0) {
-            this.#log.warn(`${this.#dropped} evento(s) foram descartados enquanto o barramento esteve fora do ar`)
-            this.#dropped = 0
-        }
-    }
-
-    async #applySubscription(subscription: EventSubscription): Promise<void> {
-        const connection = this.#connections.subscribe
-        if (!connection || this.#appliedSubscriptions.has(subscription)) return
-        this.#appliedSubscriptions.add(subscription)
-        try {
-            await connection.sub(this.#options.service, subscription.exchange, subscription.routingKey, this.#dispatch, {
-                exchange: TOPIC_EXCHANGE,
-                queue: { durable: true },
-                consumer: { noAck: false },
-                receiveFromYourself: false,
-            })
-            this.#log.info(
-                `Subscriber ${subscription.eventName} configurado (exchange "${subscription.exchange}", `
-                + `routing key "${subscription.routingKey}", fila "${this.#options.service}")`,
-            )
-        } catch (err) {
-            this.#appliedSubscriptions.delete(subscription)
-            this.#log.error(`Falha ao configurar o subscriber ${subscription.eventName}`, { err })
-        }
-    }
-
-    /**
-     * Todas as assinaturas compartilham a fila do serviço. A biblioteca chama o callback de cada routing key
-     * que "parece" casar (a comparação dela é aproximada), às vezes mais de uma vez para a mesma mensagem.
-     * Por isso cada mensagem é processada uma única vez aqui, com a comparação exata de exchange e tópico.
-     */
-    #dispatch = (message: IMessage): void => {
-        if (this.#handled.has(message)) return
-        this.#handled.add(message)
-        void this.#process(message)
-    }
-
-    async #process(message: IMessage): Promise<void> {
-        const exchange = message.fields?.exchange ?? ''
-        const routingKey = message.fields?.routingKey ?? ''
-        const event = message.content as IntegrationEvent | undefined
         const targets = this.#subscriptions.filter(sub =>
             sub.exchange === exchange
             && topicMatches(sub.routingKey, routingKey)
-            && (!event?.event_name || sub.eventName === event.event_name))
-
+            && (!event.event_name || sub.eventName === event.event_name))
         if (targets.length === 0) {
             this.#log.warn(`Mensagem sem subscriber (exchange "${exchange}", routing key "${routingKey}"): descartada`)
-            message.ack()
+            channel.ack(message)
             return
         }
-        this.#log.info(`Evento ${event?.event_name ?? '(sem nome)'} recebido de ${exchange} (${routingKey})`)
+        this.#log.info(`Evento ${event.event_name ?? '(sem nome)'} recebido de ${exchange} (${routingKey})`)
         try {
-            for (const target of targets) await target.handle(event as IntegrationEvent)
-            message.ack()
+            for (const target of targets) await target.handle(event)
+            channel.ack(message)
         } catch (err) {
             // sem requeue: um evento que sempre falha não pode travar a fila (configure uma dead-letter exchange se precisar)
-            this.#log.error(`Subscriber ${event?.event_name} falhou; mensagem descartada`, { err })
-            message.nack(false, false)
+            this.#log.error(`Subscriber ${event.event_name} falhou; mensagem descartada`, { err })
+            channel.nack(message, false, false)
         }
     }
 
-    async #startRpcServer(): Promise<void> {
-        const connection = this.#connections.rpcServer
-        if (!connection) return
-        const name = `${this.#options.service}.rpc`
-        this.#rpcServer = connection.createRpcServer(name, name, [], {
-            exchange: RPC_EXCHANGE,
-            queue: { durable: false, expires: 5000 }, // a fila some se o serviço ficar fora do ar (pedidos expirariam mesmo)
-        })
-        for (const resource of this.#resources.values()) await this.#registerResource(resource)
-        if (this.#resources.size === 0) {
-            this.#log.info('Nenhum recurso RPC para oferecer')
+    async #onRpcRequest(channel: Channel, message: ConsumeMessage): Promise<void> {
+        const { replyTo, correlationId } = message.properties as { replyTo?: string; correlationId?: string }
+        let reply: { content: Buffer; contentType: string; type?: string }
+        try {
+            const request = JSON.parse(message.content.toString()) as { resource_name?: string; handle?: unknown[] }
+            const resource = this.#resources.get(request.resource_name ?? message.fields.routingKey)
+            if (!resource) throw new Error('Resource not registered in server')
+            this.#log.debug(`Recurso RPC ${resource.name} chamado`)
+            const result = await resource.handle(...(Array.isArray(request.handle) ? request.handle : []))
+            reply = typeof result === 'string'
+                ? { content: Buffer.from(result), contentType: 'text/plain' }
+                : { content: Buffer.from(JSON.stringify(result ?? null)), contentType: 'application/json' }
+        } catch (err) {
+            const error = err instanceof Error ? err : new Error(String(err))
+            this.#log.warn(`Recurso RPC ${message.fields.routingKey} falhou: ${error.message}`)
+            // mesmo formato da amqp-client-node: texto do erro com type "error"
+            reply = { content: Buffer.from(error.toString()), contentType: 'text/plain', type: 'error' }
+        }
+        if (replyTo) {
+            channel.sendToQueue(replyTo, reply.content, { correlationId, contentType: reply.contentType, type: reply.type })
+        }
+        channel.ack(message)
+    }
+
+    #onRpcReply(message: ConsumeMessage): void {
+        type ReplyProperties = { correlationId?: string; type?: string; contentType?: string }
+        const { correlationId, type, contentType } = message.properties as ReplyProperties
+        const text = message.content.toString()
+        if (type === 'error') {
+            // "ValidationError: Parâmetros inválidos" -> "Parâmetros inválidos"
+            this.#settle(correlationId, new Error(text.replace(/^\w*Error: /, '')))
             return
         }
-        await this.#rpcServer.start()
-        this.#log.info(`Servidor RPC pronto (exchange "${name}", ${this.#resources.size} recurso(s))`)
+        let value: unknown = text
+        if (contentType === 'application/json') {
+            try {
+                value = JSON.parse(text)
+            } catch {
+                value = text
+            }
+        }
+        this.#settle(correlationId, undefined, value)
     }
 
-    async #registerResource(resource: RpcResource): Promise<void> {
-        // a biblioteca descarta Promises rejeitadas (o cliente só veria timeout): o erro volta como resposta de erro
-        this.#rpcServer?.addResource(resource.name, async (...params: unknown[]) => {
-            this.#log.debug(`Recurso RPC ${resource.name} chamado`)
-            try {
-                return await resource.handle(...params)
-            } catch (err) {
-                this.#log.warn(`Recurso RPC ${resource.name} falhou: ${(err as Error).message}`)
-                return err instanceof Error ? err : new Error(String(err))
-            }
-        })
-        this.#log.info(`Recurso RPC ${resource.name} registrado`)
+    #settle(correlationId: string | undefined, error?: Error, value?: unknown): void {
+        const call = correlationId ? this.#pendingCalls.get(correlationId) : undefined
+        if (!call || !correlationId) return
+        this.#pendingCalls.delete(correlationId)
+        clearTimeout(call.timer)
+        if (error) call.reject(error)
+        else call.resolve(value)
+    }
+
+    #rejectPendingCalls(reason: string): void {
+        for (const [id, call] of this.#pendingCalls) {
+            clearTimeout(call.timer)
+            call.reject(new Error(`RPC ${call.label}: ${reason}`))
+            this.#pendingCalls.delete(id)
+        }
     }
 }

@@ -23,6 +23,10 @@ export class InMemoryEventBus implements IEventBus {
         return this.#started
     }
 
+    public status(): Record<string, boolean> {
+        return { memory: this.#started }
+    }
+
     public start(): void {
         this.#started = true
         this.#log.info('Barramento em memória (EVENT_BUS_DRIVER=memory): eventos não saem deste processo')

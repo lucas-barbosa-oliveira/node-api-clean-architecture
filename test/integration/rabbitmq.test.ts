@@ -1,79 +1,84 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { connect, type Channel, type ChannelModel } from 'amqplib';
-import type { IntegrationEvent } from '../../src/application/port/event.bus.ts';
+import { amqpClient, type IConnection } from 'amqp-client-node';
+import { EventBusUnavailableError, type IntegrationEvent } from '../../src/application/port/event.bus.ts';
 import { RabbitMqEventBus } from '../../src/infrastructure/eventbus/rabbitmq.event.bus.ts';
 import { waitUntil } from '../helpers/wait.until.ts';
 
 // Só roda com um RabbitMQ disponível (npm run docker:infra && npm run test:docker).
-// O "outro microsserviço" é simulado com o amqplib direto: a amqp-client-node ignora mensagens publicadas
-// por conexões do mesmo processo (receiveFromYourself), então dois barramentos aqui não se enxergariam no pub/sub.
+// Dois "microsserviços" no mesmo processo, mais um terceiro usando a amqp-client-node (como os serviços antigos).
 describe('RabbitMQ (requer EVENT_BUS_DRIVER=rabbitmq)', { skip: process.env.EVENT_BUS_DRIVER !== 'rabbitmq' }, () => {
   const uri = process.env.RABBITMQ_URI as string;
   const producer = new RabbitMqEventBus({ uri, service: 'it-producer' });
   const consumer = new RabbitMqEventBus({ uri, service: 'it-consumer' });
   const received: IntegrationEvent[] = [];
-  const published: IntegrationEvent[] = [];
-  let raw: ChannelModel;
-  let channel: Channel;
+  let legacy: IConnection;
+
+  const event = (id: string): IntegrationEvent => ({ event_name: 'ItemCreatedEvent', timestamp: new Date().toISOString(), item: { id } });
+  const ids = () => received.map(e => (e.item as { id: string }).id);
+  const legacyOptions = { exchange: { type: 'topic', durable: true } };
 
   before(async () => {
-    // o "outro serviço": uma fila temporária que recebe tudo o que o producer publica em it-events
-    raw = await connect(uri);
-    channel = await raw.createChannel();
-    await channel.assertExchange('it-events', 'topic', { durable: true });
-    const { queue } = await channel.assertQueue('', { exclusive: true, autoDelete: true });
-    await channel.bindQueue(queue, 'it-events', 'items.#');
-    await channel.consume(queue, message => {
-      if (message) published.push(JSON.parse(message.content.toString()));
-    }, { noAck: true });
-
-    consumer.subscribe({
-      eventName: 'ItemCreatedEvent',
-      exchange: 'it-events',
-      routingKey: 'items.*',
-      handle: async event => { received.push(event); },
-    });
+    consumer.subscribe({ eventName: 'ItemCreatedEvent', exchange: 'it-events', routingKey: 'items.*', handle: async e => { received.push(e); } });
     consumer.provideResource({ name: 'items.sum', handle: async (a, b) => Number(a) + Number(b) });
     consumer.provideResource({ name: 'items.fail', handle: async () => { throw new Error('item inexistente'); } });
-    consumer.start();
-    // publica antes de conectar: o evento fica no buffer e é enviado quando a conexão abrir
-    await producer.publish('it-events', 'items.created', event('buffered'));
+
+    await assert.rejects(producer.publish('it-events', 'items.created', event('x')), EventBusUnavailableError);
     producer.start();
-    await waitUntil(async () => producer.isConnected && consumer.isConnected, Boolean, 15_000);
+    consumer.start();
+    await waitUntil(async () => producer.isConnected && Object.values(consumer.status()).every(Boolean), Boolean, 15_000);
+    legacy = await amqpClient.createConnection(uri, { retries: 1, interval: 500 });
   });
   after(async () => {
-    await raw.close();
+    await legacy?.close();
     await producer.close();
     await consumer.close();
   });
 
-  const event = (id: string): IntegrationEvent => ({ event_name: 'ItemCreatedEvent', timestamp: new Date().toISOString(), item: { id } });
-  const ids = () => received.map(e => (e.item as { id: string }).id);
-
-  test('publish: chega ao outro serviço, inclusive o evento que estava no buffer', async () => {
+  test('publish/subscribe entre serviços, com confirmação do broker', async () => {
     const id = crypto.randomUUID();
-    await producer.publish('it-events', 'items.created', event(id));
-    const pubIds = () => published.map(e => (e.item as { id: string }).id);
-    await waitUntil(async () => pubIds(), list => list.includes(id) && list.includes('buffered'), 10_000);
-    assert.equal(published.find(e => (e.item as { id: string }).id === id)?.event_name, 'ItemCreatedEvent');
-  });
-
-  test('subscribe: recebe só a exchange e routing key assinadas', async () => {
-    const id = crypto.randomUUID();
-    const send = (routingKey: string, itemId: string) => channel.publish('it-events', routingKey,
-      Buffer.from(JSON.stringify(event(itemId))), { contentType: 'application/json' });
-    send('other.created', 'não assinado');
-    send('items.created', id);
+    await producer.publish('it-events', 'items.created', event(id), { messageId: id });
+    await producer.publish('it-events', 'other.created', event('não assinado'));
     await waitUntil(async () => ids(), list => list.includes(id), 10_000);
     assert.ok(!ids().includes('não assinado'));
   });
 
-  test('RPC: resposta e erro do recurso chegam a quem chamou', async () => {
-    // o servidor RPC pode demorar um instante para registrar as filas depois da conexão
-    const call = () => producer.executeResource('it-consumer', 'items.sum', 2, 3).catch(() => undefined);
-    const sum = await waitUntil(call, value => value !== undefined, 10_000);
-    assert.equal(sum, 5);
-    await assert.rejects(producer.executeResource('it-consumer', 'items.fail'), /item inexistente/);
+  test('RPC: resposta, erro do recurso e recurso inexistente (sem esperar o timeout)', async () => {
+    assert.equal(await producer.executeResource('it-consumer', 'items.sum', 2, 3), 5);
+    await assert.rejects(producer.executeResource('it-consumer', 'items.fail'), /^Error: item inexistente$/);
+    const start = Date.now();
+    await assert.rejects(producer.executeResource('it-consumer', 'items.nao-existe'), /Recurso RPC indisponível/);
+    assert.ok(Date.now() - start < 2000, 'falha imediata, sem esperar o timeout de RPC');
+  });
+
+  describe('compatibilidade com serviços que usam a amqp-client-node', () => {
+    test('eles chamam o RPC deste serviço (resposta e erro)', async () => {
+      const rpc = { exchange: { type: 'direct', durable: true }, rpcTimeout: 5000 };
+      assert.equal(await legacy.rpcClient('it-consumer.rpc', 'items.sum', [4, 5], rpc), 9);
+      await assert.rejects(legacy.rpcClient('it-consumer.rpc', 'items.fail', [], rpc), /item inexistente/);
+    });
+
+    test('este serviço chama o RPC deles', async () => {
+      const server = legacy.createRpcServer('it-legacy.rpc', 'it-legacy.rpc', [], { exchange: { type: 'direct', durable: true }, queue: { expires: 5000 } });
+      server.addResource('legacy.echo', (value: unknown) => ({ echo: value }));
+      await server.start();
+      assert.deepEqual(await producer.executeResource('it-legacy', 'legacy.echo', 'oi'), { echo: 'oi' });
+    });
+
+    test('eles recebem o que este serviço publica, e este serviço recebe o que eles publicam', async () => {
+      const theirs: unknown[] = [];
+      await legacy.sub('it-legacy', 'it-events', 'items.legacy', message => {
+        theirs.push(message.content);
+        message.ack();
+      }, { ...legacyOptions, queue: { durable: true }, consumer: { noAck: false } });
+      const fromUs = crypto.randomUUID();
+      await producer.publish('it-events', 'items.legacy', event(fromUs));
+      await waitUntil(async () => theirs.length, n => n > 0, 10_000);
+      assert.equal((theirs[0] as { item: { id: string } }).item.id, fromUs);
+
+      const fromThem = crypto.randomUUID();
+      await legacy.pub('it-events', 'items.created', { content: event(fromThem) }, legacyOptions);
+      await waitUntil(async () => ids(), list => list.includes(fromThem), 10_000);
+    });
   });
 });

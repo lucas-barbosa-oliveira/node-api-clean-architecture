@@ -1,5 +1,6 @@
 import type { JobHandler } from '../../application/port/job.handler.ts'
 import type { IJobRepository } from '../../application/port/job.repository.ts'
+import { appMetrics } from '../telemetry/metrics.ts'
 
 /**
  * Executa um job: marca como running, chama o handler e grava o resultado.
@@ -16,6 +17,7 @@ export async function runJob(
 
     job.start()
     await repo.save(job)
+    const startedAt = performance.now()
 
     try {
         const handler = handlers[job.type]
@@ -25,4 +27,6 @@ export async function runJob(
         job.fail(err instanceof Error ? err.message : String(err))
     }
     await repo.save(job)
+    appMetrics.jobsCompleted.add(1, { type: job.type, status: job.status })
+    appMetrics.jobDuration.record((performance.now() - startedAt) / 1000, { type: job.type, status: job.status })
 }

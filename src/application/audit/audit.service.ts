@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import type { IEventBus, IntegrationEvent } from '../port/event.bus.ts'
+import type { IntegrationEvent } from '../port/event.bus.ts'
 import { silentLogger, type ILogger } from '../port/logger.ts'
+import type { IOutbox } from '../port/outbox.ts'
 import { limitSize, redact } from './redact.ts'
 
 export const AUDIT_EXCHANGE = 'audit'
@@ -28,26 +29,28 @@ export type AuditRecord = {
 }
 
 /**
- * Publica no barramento um RequestAuditEvent por operação, para o serviço de auditoria.
+ * Registra um RequestAuditEvent por operação, para o serviço de auditoria. O evento vai para o outbox (gravado no banco)
+ * e é publicado pelo relay: uma queda do RabbitMQ, ou um reinício da API, não perde auditoria.
  * Segredos (senhas, tokens, códigos de pareamento) são trocados por [REDACTED] antes de sair da aplicação.
  * Nunca afeta a requisição: falhas viram log.
  */
 export class AuditService {
-    #bus: IEventBus
+    #outbox: IOutbox
     #service: string
     #maxBodyBytes: number
     #log: ILogger
 
-    constructor(deps: { bus: IEventBus; service: string; maxBodyBytes?: number; logger?: ILogger }) {
-        this.#bus = deps.bus
+    constructor(deps: { outbox: IOutbox; service: string; maxBodyBytes?: number; logger?: ILogger }) {
+        this.#outbox = deps.outbox
         this.#service = deps.service
         this.#maxBodyBytes = deps.maxBodyBytes ?? 16_384
         this.#log = deps.logger ?? silentLogger
     }
 
     public record(record: AuditRecord): void {
-        this.#bus.publish(AUDIT_EXCHANGE, AUDIT_ROUTING_KEY, this.toEvent(record)).catch(err => {
-            this.#log.error(`Falha ao publicar a auditoria de ${record.request.method} ${record.request.path}`, { err })
+        const message = { exchange: AUDIT_EXCHANGE, routingKey: AUDIT_ROUTING_KEY, event: this.toEvent(record) }
+        this.#outbox.add(message).catch(err => {
+            this.#log.error(`Falha ao gravar a auditoria de ${record.request.method} ${record.request.path}`, { err })
         })
     }
 

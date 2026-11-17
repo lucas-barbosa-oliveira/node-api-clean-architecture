@@ -11,7 +11,7 @@ describe('Auth API', () => {
   test('GET /health é público', async () => {
     const res = await request(ctx.app).get('/health');
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body, { status: 'ok' });
+    assert.equal(res.body.status, 'ok');
   });
 
   test('POST /auth/login devolve um access token no formato OAuth 2.0', async () => {

@@ -4,25 +4,38 @@ import { ConflictError, NotFoundError } from '../../domain/error/index.ts'
 import { User } from '../../domain/model/user.ts'
 import { normalizeEmail } from '../../domain/utils/normalize.ts'
 import { validateCreateUser } from '../../domain/validator/user.validator.ts'
+import { IntegrationEvents } from '../event/integration.events.ts'
+import type { IOutbox } from '../port/outbox.ts'
 import type { IPasswordHasher } from '../port/password.hasher.ts'
+import type { IUnitOfWork } from '../port/unit.of.work.ts'
 import type { IUserRepository } from '../port/user.repository.ts'
 import { and, type ListQuery, type Page } from '../query/list.query.ts'
 
 export class UserService {
     #repo: IUserRepository
     #hasher: IPasswordHasher
+    #outbox: IOutbox
+    #unitOfWork: IUnitOfWork
 
-    constructor(repo: IUserRepository, hasher: IPasswordHasher) {
+    constructor(repo: IUserRepository, hasher: IPasswordHasher, deps: { outbox: IOutbox; unitOfWork: IUnitOfWork }) {
         this.#repo = repo
         this.#hasher = hasher
+        this.#outbox = deps.outbox
+        this.#unitOfWork = deps.unitOfWork
     }
 
-    /** Cadastra um gestor ou cliente (quem pode chamar é decidido pelo escopo users:create da rota). */
+    /**
+     * Cadastra um gestor ou cliente (quem pode chamar é decidido pelo escopo users:create da rota).
+     * O usuário e o UserCreatedEvent são gravados na mesma transação.
+     */
     public async create(input: unknown): Promise<User> {
         const { password, ...data } = validateCreateUser(input)
         if (await this.#repo.findByEmail(data.email)) throw new ConflictError('E-mail já cadastrado')
         const user = User.create({ ...data, passwordHash: await this.#hasher.hash(password) })
-        await this.#repo.save(user)
+        await this.#unitOfWork.run(async () => {
+            await this.#repo.save(user)
+            await this.#outbox.add(IntegrationEvents.userCreated(user))
+        })
         return user
     }
 

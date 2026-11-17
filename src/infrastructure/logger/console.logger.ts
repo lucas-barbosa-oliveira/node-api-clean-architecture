@@ -1,3 +1,4 @@
+import { trace } from '@opentelemetry/api'
 import type { ILogger, LogLevel, LogMeta } from '../../application/port/logger.ts'
 
 const SEVERITY: Record<LogLevel, number> = { silent: 0, error: 1, warn: 2, info: 3, debug: 4 }
@@ -64,6 +65,11 @@ export class ConsoleLogger implements ILogger {
         if (SEVERITY[level] > SEVERITY[this.#options.level]) return
         const timestamp = new Date().toISOString()
         const { err, ...rest } = meta ?? {}
+        // dentro de uma requisição ou mensagem rastreada, o log aponta para o trace (busca direta no Jaeger)
+        const span = trace.getActiveSpan()?.spanContext()
+        const traceIds = span && span.traceId !== '00000000000000000000000000000000'
+            ? { trace_id: span.traceId, span_id: span.spanId }
+            : undefined
         const error = err instanceof Error ? err : undefined
 
         if (this.#options.format === 'json') {
@@ -73,6 +79,7 @@ export class ConsoleLogger implements ILogger {
                 label: this.#options.label,
                 ...(this.#component && { component: this.#component }),
                 message,
+                ...traceIds,
                 ...rest,
                 ...(err !== undefined && { err: error ? { message: error.message, stack: error.stack } : err }),
             }), level)
@@ -82,7 +89,8 @@ export class ConsoleLogger implements ILogger {
         const levelText = this.#options.colors ? `${COLORS[level]}${level}${RESET}` : level
         const component = this.#component ? `[${this.#component}] ` : ''
         const extra = Object.keys(rest).length > 0 ? ` ${safeJson(rest)}` : ''
-        let line = `${this.#options.label} @ ${timestamp} ${levelText}: ${component}${message}${extra}`
+        const traceText = traceIds ? ` trace_id=${traceIds.trace_id}` : ''
+        let line = `${this.#options.label} @ ${timestamp} ${levelText}: ${component}${message}${extra}${traceText}`
         if (error) line += `\n${error.stack ?? error.message}`
         else if (err !== undefined) line += ` ${safeJson(err)}`
         this.#options.write(line, level)

@@ -3,6 +3,7 @@ import { loadEnv } from '../di/env.ts'
 import { buildLogger } from '../di/logger.ts'
 import { registerEventBus } from '../presentation/eventbus/index.ts'
 import { createApp } from './app.ts'
+import { shutdownTelemetry } from './telemetry.ts'
 
 const env = loadEnv()
 const logger = buildLogger(env)
@@ -53,7 +54,10 @@ const server = createApp(container).listen(port, () => {
 })
 await container.scheduler.start() // tasks de startup e agendadas
 
+container.outboxRelay.start()
+
 lifecycle.stop = async () => {
+    container.health.markShuttingDown() // /health/ready passa a responder 503: o balanceador para de mandar tráfego
     // 1) para de aceitar requisições; 2) agendador e fila terminam o que está em andamento; 3) fecha conexões
     await new Promise<void>(resolve => {
         server.close(() => resolve())
@@ -61,4 +65,5 @@ lifecycle.stop = async () => {
     })
     log.info('Servidor HTTP encerrado')
     await container.close()
+    await shutdownTelemetry() // envia os últimos spans
 }

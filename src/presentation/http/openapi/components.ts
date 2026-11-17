@@ -10,7 +10,9 @@ const timestamps = { createdAt: S.dateTime(), updatedAt: S.dateTime() }
 /** Formato das respostas. Nomes iguais aos campos que a API devolve (JSON público dos models). */
 export const schemas: Record<string, JsonSchema> = {
     Error: S.object({
-        code: S.enum(['VALIDATION', 'UNAUTHORIZED', 'FORBIDDEN', 'NOT_FOUND', 'CONFLICT', 'BAD_REQUEST', 'INTERNAL']),
+        code: S.enum([
+            'VALIDATION', 'UNAUTHORIZED', 'FORBIDDEN', 'NOT_FOUND', 'CONFLICT', 'BAD_REQUEST', 'UNAVAILABLE', 'INTERNAL',
+        ]),
         message: S.string(),
         issues: S.array({
             type: 'object',
@@ -117,7 +119,25 @@ export const schemas: Record<string, JsonSchema> = {
         })),
     }),
 
-    Health: S.object({ status: S.enum(['ok']) }),
+    Health: S.object({ status: S.enum(['ok']), uptime_seconds: S.int() }),
+
+    Readiness: S.object({
+        status: S.enum(['ready', 'not_ready']),
+        checks: {
+            type: 'object',
+            description: 'Uma entrada por dependência (mongodb, redis, influxdb, rabbitmq, outbox), conforme os drivers em uso.',
+            additionalProperties: {
+                type: 'object',
+                properties: {
+                    status: S.enum(['up', 'down']),
+                    critical: { type: 'boolean', description: 'Se estiver down, a instância não está pronta.' },
+                    latency_ms: S.int(),
+                    details: { type: 'object' },
+                },
+                required: ['status', 'critical', 'latency_ms'],
+            },
+        },
+    }),
 }
 
 const errorResponse = (description: string, example: { code: string; message: string }) => ({
@@ -141,6 +161,16 @@ export const responses = {
         { code: 'NOT_FOUND', message: 'Não encontrado' },
     ),
     Conflict: errorResponse('Conflito com um registro existente.', { code: 'CONFLICT', message: 'E-mail já cadastrado' }),
+    ServiceUnavailable: {
+        ...errorResponse(
+            'Uma dependência (banco, fila ou barramento) está fora do ar. Tente de novo após o tempo de Retry-After.',
+            { code: 'UNAVAILABLE', message: 'Serviço temporariamente indisponível. Tente novamente em instantes' },
+        ),
+        headers: {
+            'X-Request-ID': { $ref: '#/components/headers/XRequestId' },
+            'Retry-After': { description: 'Segundos até tentar de novo.', schema: S.int() },
+        },
+    },
     TooManyRequests: {
         description: 'Limite de requisições do Kong excedido (só pelo gateway). Veja os headers RateLimit-*.',
     },

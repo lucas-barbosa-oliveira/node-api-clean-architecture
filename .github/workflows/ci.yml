@@ -1,0 +1,86 @@
+# Integração contínua: roda a cada push e pull request.
+#   quality      lint, typecheck e testes em memória (rápido, sem Docker)
+#   integration  testes contra MongoDB (replica set), Redis, InfluxDB e RabbitMQ reais
+#   image        build da imagem (Dockerfile) e teste de fumaça do ambiente completo pelo Kong
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+# um push novo na mesma branch cancela a execução anterior
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "24"
+  # o Node só imprime aviso de recurso experimental (type stripping); deixa o log limpo
+  NODE_NO_WARNINGS: "1"
+
+jobs:
+  quality:
+    name: Lint, typecheck e testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  integration:
+    name: Testes de integração
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      # gera o par de chaves JWT usado pelo .env.docker (não versionado)
+      - run: npm run kong:setup
+      - name: Subir dependências
+        run: docker compose up -d --wait mongo redis influxdb rabbitmq
+      - run: npm run test:docker
+      - name: Logs dos containers (em caso de falha)
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+  image:
+    name: Imagem e teste de fumaça
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build da imagem e subida do ambiente completo
+        run: npm run docker:up
+      - name: Pronta pelo Kong (readiness, documentação e login)
+        run: |
+          set -euo pipefail
+          curl -fsS http://localhost:8000/health/ready | tee /dev/stderr | grep -q '"status":"ready"'
+          curl -fsS -o /dev/null http://localhost:8000/reference/openapi.json
+          curl -fsS http://localhost:8000/auth/login -H 'content-type: application/json' \
+            -d '{"email":"admin@exemplo.com","password":"admin-local-123"}' | grep -q access_token
+      - name: Logs dos containers (em caso de falha)
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+      - name: Derrubar
+        if: always()
+        run: docker compose down -v

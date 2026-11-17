@@ -9,9 +9,12 @@ import {
     PAIRING_CODE_LENGTH,
     validateClaimDevice,
 } from '../../domain/validator/device.validator.ts'
+import { IntegrationEvents } from '../event/integration.events.ts'
 import type { IDeviceRepository } from '../port/device.repository.ts'
+import type { IOutbox } from '../port/outbox.ts'
 import type { IPairingCodeRepository } from '../port/pairing.code.repository.ts'
 import type { ITokenService } from '../port/token.service.ts'
+import type { IUnitOfWork } from '../port/unit.of.work.ts'
 import type { IUserRepository } from '../port/user.repository.ts'
 import { and, type ListQuery, type Page } from '../query/list.query.ts'
 
@@ -28,6 +31,8 @@ export class DeviceService {
     #tokens: ITokenService
     #codeTtlSeconds: number
     #deviceTokenTtlSeconds: number
+    #outbox: IOutbox
+    #unitOfWork: IUnitOfWork
 
     constructor(deps: {
         devices: IDeviceRepository;
@@ -36,7 +41,11 @@ export class DeviceService {
         tokens: ITokenService;
         pairingCodeTtlSeconds: number;
         deviceTokenTtlSeconds: number;
+        outbox: IOutbox;
+        unitOfWork: IUnitOfWork;
     }) {
+        this.#outbox = deps.outbox
+        this.#unitOfWork = deps.unitOfWork
         this.#devices = deps.devices
         this.#codes = deps.pairingCodes
         this.#users = deps.users
@@ -69,29 +78,36 @@ export class DeviceService {
     /**
      * A ESP32 troca o código digitado pelo id do cliente e por um token de dispositivo.
      * O token é o que autentica os envios: o clientId sozinho não é segredo e não basta para gravar dados.
+     * Uso do código, revogação do registro anterior, novo dispositivo e eventos: tudo na mesma transação.
      */
     public async claim(input: unknown): Promise<ClaimedDevice> {
         const data = validateClaimDevice(input)
         const deviceId = randomUUID()
-        const pairing = await this.#codes.consume(hashCode(data.code), deviceId)
-        if (!pairing) throw new UnauthorizedError('Código de pareamento inválido, expirado ou já usado')
 
-        // o mesmo hardware pareado de novo (ex.: ESP32 resetada ou passada para outro cliente) invalida o registro anterior
-        if (data.hardwareId) {
-            for (const previous of await this.#devices.findActiveByHardwareId(data.hardwareId)) {
-                previous.revoke()
-                await this.#devices.save(previous)
+        const device = await this.#unitOfWork.run(async () => {
+            const pairing = await this.#codes.consume(hashCode(data.code), deviceId)
+            if (!pairing) throw new UnauthorizedError('Código de pareamento inválido, expirado ou já usado')
+
+            // o mesmo hardware pareado de novo (ex.: ESP32 resetada ou passada para outro cliente) invalida o registro anterior
+            if (data.hardwareId) {
+                for (const previous of await this.#devices.findActiveByHardwareId(data.hardwareId)) {
+                    previous.revoke()
+                    await this.#devices.save(previous)
+                    await this.#outbox.add(IntegrationEvents.deviceRevoked(previous, 'replaced_by_new_pairing'))
+                }
             }
-        }
 
-        const device = new Device({
-            id: deviceId,
-            clientId: pairing.clientId,
-            name: data.name,
-            hardwareId: data.hardwareId,
-            firmware: data.firmware,
+            const created = new Device({
+                id: deviceId,
+                clientId: pairing.clientId,
+                name: data.name,
+                hardwareId: data.hardwareId,
+                firmware: data.firmware,
+            })
+            await this.#devices.save(created)
+            await this.#outbox.add(IntegrationEvents.devicePaired(created))
+            return created
         })
-        await this.#devices.save(device)
 
         const token = await this.#tokens.issue(
             { userId: device.id, role: 'device', scopes: DEVICE_SCOPES, clientId: device.clientId },
@@ -113,7 +129,10 @@ export class DeviceService {
             throw new NotFoundError('Dispositivo não encontrado')
         }
         device.revoke()
-        await this.#devices.save(device)
+        await this.#unitOfWork.run(async () => {
+            await this.#devices.save(device)
+            await this.#outbox.add(IntegrationEvents.deviceRevoked(device, 'revoked_by_user'))
+        })
     }
 
     /** Usado na autenticação de cada envio: o token só vale enquanto o dispositivo estiver ativo e com o mesmo cliente. */

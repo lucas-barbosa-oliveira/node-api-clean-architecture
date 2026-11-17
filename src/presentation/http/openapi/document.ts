@@ -25,6 +25,8 @@ type Operation = {
     /** status -> resposta de sucesso */
     ok: Record<number, { description: string; schema?: JsonSchema; headers?: Record<string, object>; example?: unknown }>;
     errors?: ErrorName[];
+    /** Não acessa banco nem fila (nunca responde 503 por dependência fora do ar). */
+    noDependencies?: boolean;
 }
 
 const ROLE_LABEL: Record<string, string> = { admin: 'administrador', manager: 'gestor', client: 'cliente' }
@@ -46,9 +48,11 @@ function operation(op: Operation): object {
     }
     if (op.body) errors.add('BadRequest')
     errors.add('TooManyRequests')
+    if (!op.noDependencies) errors.add('ServiceUnavailable')
 
     const status: Record<ErrorName, number> = {
-        BadRequest: 400, Unauthorized: 401, Forbidden: 403, NotFound: 404, Conflict: 409, TooManyRequests: 429,
+        BadRequest: 400, Unauthorized: 401, Forbidden: 403, NotFound: 404, Conflict: 409,
+        TooManyRequests: 429, ServiceUnavailable: 503,
     }
     const okResponses = Object.fromEntries(Object.entries(op.ok).map(([code, res]) => [code, {
         description: res.description,
@@ -107,16 +111,43 @@ export function buildOpenApiDocument(info: { title: string; version: string }) {
         '/health': {
             get: operation({
                 tag: 'Sistema',
-                summary: 'Verificação de saúde',
-                description: 'Usada pelo Docker (HEALTHCHECK). Não aparece na auditoria.',
+                summary: 'Processo no ar (alias de /health/live)',
                 access: 'public',
-                ok: { 200: { description: 'API no ar.', schema: S.ref('Health') } },
+                noDependencies: true,
+                ok: { 200: { description: 'Processo no ar.', schema: S.ref('Health') } },
+            }),
+        },
+        '/health/live': {
+            get: operation({
+                tag: 'Sistema',
+                summary: 'Liveness: o processo está de pé',
+                description: 'Não consulta dependências. Usada pelo HEALTHCHECK do Docker: se falhar, o container é reiniciado. '
+                    + 'Não aparece na auditoria.',
+                access: 'public',
+                noDependencies: true,
+                ok: { 200: { description: 'Processo no ar.', schema: S.ref('Health') } },
+            }),
+        },
+        '/health/ready': {
+            get: operation({
+                tag: 'Sistema',
+                summary: 'Readiness: a instância consegue atender',
+                description: 'Verifica cada dependência. Responde 503 se alguma crítica (MongoDB, Redis) estiver fora do ar '
+                    + 'ou se a instância estiver encerrando: o balanceador deixa de enviar tráfego, sem reiniciar. '
+                    + 'Dependências não críticas (InfluxDB, RabbitMQ, outbox) aparecem no relatório sem tirar a instância do ar.',
+                access: 'public',
+                noDependencies: true,
+                ok: {
+                    200: { description: 'Pronta.', schema: S.ref('Readiness') },
+                    503: { description: 'Não está pronta (ver checks).', schema: S.ref('Readiness') },
+                },
             }),
         },
         '/.well-known/jwks.json': {
             get: operation({
                 tag: 'Autenticação',
                 summary: 'Chave pública dos tokens (JWKS)',
+                noDependencies: true,
                 description: 'Outros serviços validam os JWTs com esta chave, sem chamar a API.',
                 access: 'public',
                 ok: { 200: { description: 'Chaves públicas.', schema: S.ref('Jwks') } },

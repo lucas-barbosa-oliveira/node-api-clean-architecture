@@ -13,6 +13,7 @@ import { timeBounds, type Filter, type ListQuery, type Page } from '../../applic
 import type { TimeWindow } from '../../application/query/time.window.ts'
 import type { DeviceStatusSample, Passage, PassageDirection, PassageWindow } from '../../domain/model/passage.ts'
 import { formatMs, redactUri } from '../resilience/retry.ts'
+import { appMetrics } from '../telemetry/metrics.ts'
 import { toFluxPredicate } from './flux.filter.ts'
 
 /**
@@ -73,6 +74,7 @@ export class InfluxPassageStore implements IPassageStore {
         }
         this.#writeApi.writePoints(points)
         await this.#writeApi.flush()
+        appMetrics.passagesWritten.add(passages.length, { store: 'influxdb' })
     }
 
     public async list(query: ListQuery): Promise<Page<Passage>> {
@@ -117,6 +119,11 @@ export class InfluxPassageStore implements IPassageStore {
             out: Number(row.out ?? 0),
             unknown: Number(row.unknown ?? 0),
         }))
+    }
+
+    /** Último resultado do ping periódico (para o /health/ready). */
+    public get isReachable(): boolean {
+        return this.#monitor.isUp
     }
 
     public async close(): Promise<void> {

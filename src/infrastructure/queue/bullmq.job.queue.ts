@@ -25,18 +25,20 @@ export class BullMqJobQueue implements IJobQueue {
     workerConnection: Redis;
     concurrency?: number;
     queueName?: string;
+    /** Prefixo das chaves no Redis (padrão do BullMQ: bull). */
+    prefix?: string;
     logger?: ILogger;
   }) {
         const log = deps.logger ?? silentLogger
         const name = deps.queueName ?? QUEUE_NAME
-        this.#queue = new Queue(name, { connection: deps.queueConnection })
+        this.#queue = new Queue(name, { connection: deps.queueConnection, prefix: deps.prefix })
         this.#worker = new Worker(
             name,
             // erros de negócio viram status "failed" dentro do runJob; erros de infra sobem e o BullMQ tenta de novo
             async bullJob => {
                 await runJob(deps.repo, deps.handlers, bullJob.data.jobId)
             },
-            { connection: deps.workerConnection, concurrency: deps.concurrency ?? 2 },
+            { connection: deps.workerConnection, concurrency: deps.concurrency ?? 2, prefix: deps.prefix },
         )
         this.#queue.on('error', onQueueError(log, `Erro na fila "${name}"`))
         this.#worker.on('error', onQueueError(log, `Erro no worker da fila "${name}"`))

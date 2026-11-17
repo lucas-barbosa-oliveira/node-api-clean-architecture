@@ -3,6 +3,7 @@ import { timeBounds, type Filter, type ListQuery, type Page } from '../../applic
 import type { TimeWindow } from '../../application/query/time.window.ts'
 import type { Passage, PassageWindow } from '../../domain/model/passage.ts'
 import { matches, queryDocs } from '../repository/in-memory/in.memory.query.ts'
+import { appMetrics } from '../telemetry/metrics.ts'
 
 /**
  * Série temporal em memória, para desenvolvimento e testes sem InfluxDB.
@@ -13,6 +14,7 @@ export class InMemoryPassageStore implements IPassageStore {
     #points = new Map<string, Passage>()
 
     public async write(passages: Passage[]): Promise<void> {
+        appMetrics.passagesWritten.add(passages.length, { store: 'memory' })
         for (const passage of passages) {
             this.#points.set(`${passage.deviceId}|${passage.direction}|${passage.occurredAt.getTime()}`, structuredClone(passage))
         }

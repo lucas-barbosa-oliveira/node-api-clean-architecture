@@ -12,7 +12,12 @@ const repoSchema = z.discriminatedUnion('REPOSITORY_DRIVER', [
 
 const queueSchema = z.discriminatedUnion('QUEUE_DRIVER', [
     z.object({ QUEUE_DRIVER: z.literal('in-process') }),
-    z.object({ QUEUE_DRIVER: z.literal('redis'), REDIS_URL: z.string().min(1) }),
+    z.object({
+        QUEUE_DRIVER: z.literal('redis'),
+        REDIS_URL: z.string().min(1),
+        /** Prefixo das chaves do BullMQ no Redis: separa ambientes que compartilham o mesmo Redis (ex.: testes). */
+        QUEUE_PREFIX: z.string().regex(/^[\w-]+$/).default('bull'),
+    }),
 ])
 
 const timeseriesSchema = z.discriminatedUnion('TIMESERIES_DRIVER', [
@@ -46,8 +51,8 @@ const observabilitySchema = z.object({
     LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
     /** text (legível) ou json (uma linha JSON por log, para agregadores). */
     LOG_FORMAT: z.enum(['text', 'json']).default('text'),
-    /** Eventos guardados enquanto o barramento está fora do ar (os mais antigos são descartados acima disso). */
-    EVENT_BUS_BUFFER_SIZE: z.coerce.number().int().min(0).max(100_000).default(1000),
+    /** Intervalo com que o relay procura eventos novos no outbox (gravados por outras instâncias). */
+    OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).max(60_000).default(1000),
     /** Publica um RequestAuditEvent por requisição. */
     AUDIT_ENABLED: z.stringbool().default(true),
     /** Prefixos de caminho que não são auditados, separados por vírgula. */

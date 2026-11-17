@@ -5,11 +5,13 @@ import { ConflictError, NotFoundError, ValidationError } from '../../src/domain/
 import { ScryptPasswordHasher } from '../../src/infrastructure/security/scrypt.password.hasher.ts';
 import { InMemoryUserRepository } from '../../src/infrastructure/repository/in-memory/in.memory.user.repository.ts';
 import { actorFor, actorOf, listQuery } from '../helpers/fixtures.ts';
+import { InMemoryOutbox } from '../../src/infrastructure/outbox/in.memory.outbox.ts';
+import { noTransaction } from '../../src/application/port/unit.of.work.ts';
 
 const setup = () => {
   const repo = new InMemoryUserRepository();
   const hasher = new ScryptPasswordHasher();
-  return { repo, hasher, service: new UserService(repo, hasher) };
+  return { repo, hasher, service: new UserService(repo, hasher, { outbox: new InMemoryOutbox(), unitOfWork: noTransaction }) };
 };
 const valid = { name: ' Ana ', email: '  ANA@X.com ', password: 'senha-forte', role: 'manager' };
 

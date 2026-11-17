@@ -8,10 +8,16 @@ export const ADMIN = { email: 'admin@teste.com', password: 'admin-senha-teste' }
 
 /** Monta uma instância completa da aplicação, respeitando REPOSITORY_DRIVER / QUEUE_DRIVER do ambiente. */
 export async function makeApp(overrides: Record<string, string> = {}) {
+  // banco separado: os testes não misturam dados (nem eventos pendentes no outbox) com a API de desenvolvimento
+  const mongoDb = overrides.MONGO_DB ?? `${process.env.MONGO_DB ?? 'app'}_test`;
   const env = loadEnv({
     ...process.env,
     LOG_LEVEL: process.env.TEST_LOG_LEVEL ?? 'silent', // TEST_LOG_LEVEL=info mostra os logs da aplicação nos testes
     REPORT_DURATION_MS: '50', // relatório rápido nos testes (ignora o valor do .env.docker)
+    MONGO_DB: mongoDb,
+    // a fila acompanha o banco: um worker de outro banco (a API rodando ao lado, ou outro arquivo de teste
+    // com banco próprio) não pega jobs que não consegue encontrar
+    QUEUE_PREFIX: `bull-${mongoDb}`,
     ADMIN_EMAIL: ADMIN.email,
     ADMIN_PASSWORD: ADMIN.password,
     ...overrides,

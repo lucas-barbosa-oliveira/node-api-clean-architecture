@@ -15,6 +15,8 @@ import { JwtTokenService } from '../../src/infrastructure/security/jwt.token.ser
 import { toFluxPredicate } from '../../src/infrastructure/timeseries/flux.filter.ts';
 import { InMemoryPassageStore } from '../../src/infrastructure/timeseries/in.memory.passage.store.ts';
 import { actorFor, actorOf, listQuery, newUser } from '../helpers/fixtures.ts';
+import { InMemoryOutbox } from '../../src/infrastructure/outbox/in.memory.outbox.ts';
+import { noTransaction } from '../../src/application/port/unit.of.work.ts';
 
 const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
 
@@ -23,7 +25,10 @@ async function setup() {
   const devices = new InMemoryDeviceRepository();
   const pairingCodes = new InMemoryPairingCodeRepository();
   const tokens = new JwtTokenService({ ...keys, issuer: 'i', audience: 'a', expiresInSeconds: 600 });
-  const service = new DeviceService({ devices, pairingCodes, users, tokens, pairingCodeTtlSeconds: 600, deviceTokenTtlSeconds: 86_400 * 365 });
+  const outbox = new InMemoryOutbox();
+  const service = new DeviceService({
+    devices, pairingCodes, users, tokens, pairingCodeTtlSeconds: 600, deviceTokenTtlSeconds: 86_400 * 365, outbox, unitOfWork: noTransaction,
+  });
   const store = new InMemoryPassageStore();
   const passages = new PassageService(store, devices);
   const [client, otherClient, manager] = [newUser('client'), newUser('client'), newUser('manager')];

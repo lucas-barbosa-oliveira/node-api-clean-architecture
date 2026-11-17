@@ -8,6 +8,7 @@ import { InMemoryEventBus } from '../../src/infrastructure/eventbus/in.memory.ev
 import { topicMatches } from '../../src/infrastructure/eventbus/topic.ts';
 import { ConsoleLogger } from '../../src/infrastructure/logger/console.logger.ts';
 import { redactUri, retryUntilConnected } from '../../src/infrastructure/resilience/retry.ts';
+import { InMemoryOutbox } from '../../src/infrastructure/outbox/in.memory.outbox.ts';
 
 describe('ConsoleLogger', () => {
   const capture = (level: 'info' | 'warn' | 'debug', format: 'text' | 'json' = 'text') => {
@@ -121,7 +122,7 @@ describe('Auditoria', () => {
     ...overrides,
   });
   const service = (maxBodyBytes = 16_384) =>
-    new AuditService({ bus: new InMemoryEventBus({ service: 'api' }), service: 'api', maxBodyBytes });
+    new AuditService({ outbox: new InMemoryOutbox(), service: 'api', maxBodyBytes });
 
   test('monta o RequestAuditEvent com quem, quando, entrada e resposta, sem segredos', () => {
     const event = service().toEvent(record());
