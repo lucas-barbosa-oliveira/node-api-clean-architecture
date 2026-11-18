@@ -1,0 +1,72 @@
+# CI/CD no GitLab (destino): componentes da plataforma (platform/ci-templates) e git-flow com promoção por GitOps.
+# Enquanto o repositório estiver no GitHub, o .github/workflows segue valendo; ao migrar, remova-o junto com o
+# Dependabot e o CodeQL (substituídos por Renovate e pelo SAST do GitLab, aqui).
+stages: [test, build, deploy]
+
+variables:
+  GITOPS_PROJECT: matrixgrid/gitops
+  APP: api-clean-architecture
+
+include:
+  - component: $CI_SERVER_FQDN/platform/ci-templates/node-quality@v1
+  - component: $CI_SERVER_FQDN/platform/ci-templates/security@v1
+  - component: $CI_SERVER_FQDN/platform/ci-templates/helm-validate@v1
+    inputs:
+      chart: oci://$CI_REGISTRY/platform/infra/charts/microservice
+      chart_version: 0.1.0
+      values: deploy/values.yaml test/fixtures/helm/dev.yaml
+      namespace: matrixgrid
+  - component: $CI_SERVER_FQDN/platform/ci-templates/tofu-validate@v1
+    inputs:
+      dirs: dev/vault
+  # integração no runner dedicado (VM com Docker): sem TLS, com TLS e com Vault
+  - component: $CI_SERVER_FQDN/platform/ci-templates/node-integration@v1
+    inputs:
+      job_name: integration
+  - component: $CI_SERVER_FQDN/platform/ci-templates/node-integration@v1
+    inputs:
+      job_name: integration-tls
+      setup: "npm run tls:setup && npm run kong:setup && docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --wait mongo redis influxdb rabbitmq"
+      test: npm run test:docker:tls
+      teardown: docker compose -f docker-compose.yml -f docker-compose.tls.yml down -v --remove-orphans
+  - component: $CI_SERVER_FQDN/platform/ci-templates/node-integration@v1
+    inputs:
+      job_name: integration-vault
+      setup: npm run docker:infra:vault
+      test: npm run test:docker:vault
+      teardown: docker compose -f docker-compose.yml -f docker-compose.tls.yml -f docker-compose.vault.yml down -v --remove-orphans
+  # imagem construída uma vez (develop e release/*), com scan, SBOM e assinatura
+  - component: $CI_SERVER_FQDN/platform/ci-templates/container-image@v1
+    inputs:
+      sign: true
+  # git-flow: develop -> dev (commit), release/* -> hml (MR), tag vX.Y.Z -> prd copiando de hml (MR com aprovação)
+  - component: $CI_SERVER_FQDN/platform/ci-templates/gitops-promote@v1
+    inputs:
+      job_name: promote-dev
+      gitops_project: matrixgrid/gitops
+      app: api-clean-architecture
+      env: dev
+      rules_if: $CI_COMMIT_BRANCH == "develop"
+  - component: $CI_SERVER_FQDN/platform/ci-templates/gitops-promote@v1
+    inputs:
+      job_name: promote-hml
+      gitops_project: matrixgrid/gitops
+      app: api-clean-architecture
+      env: hml
+      merge_request: true
+      rules_if: $CI_COMMIT_BRANCH =~ /^release\//
+  - component: $CI_SERVER_FQDN/platform/ci-templates/gitops-promote@v1
+    inputs:
+      job_name: promote-prd
+      gitops_project: matrixgrid/gitops
+      app: api-clean-architecture
+      env: prd
+      from_env: hml
+      merge_request: true
+      rules_if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  - component: $CI_SERVER_FQDN/platform/ci-templates/renovate@v1
+
+promote-dev:
+  needs: [container-build, container-scan]
+promote-hml:
+  needs: [container-build, container-scan]

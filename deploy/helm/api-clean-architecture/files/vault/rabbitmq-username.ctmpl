@@ -1,1 +1,0 @@
-{{- with secret "rabbitmq/creds/api" }}{{ .Data.username }}{{ end -}}

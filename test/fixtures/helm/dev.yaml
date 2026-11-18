@@ -1,0 +1,20 @@
+# Ambiente dev como no GitOps (matrixgrid-gitops/apps/api-clean-architecture/envs/dev/values.yaml).
+environment: dev
+image:
+  repository: ghcr.io/lucas-barbosa-oliveira/node-api-clean-architecture
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+replicaCount: 1
+autoscaling:
+  enabled: false
+kong:
+  host: api-dev.matrixgrid.uk
+  tls:
+    secretName: api-dev-matrixgrid-uk-tls
+  jwt:
+    publicKey: |
+      -----BEGIN PUBLIC KEY-----
+      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEexemplo
+      -----END PUBLIC KEY-----
+env:
+  ADMIN_EMAIL: admin@exemplo.com
+  ADMIN_PASSWORD_FILE: "@@SECRETS_DIR@@/admin-password"

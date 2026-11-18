@@ -1,0 +1,20 @@
+# Sem Vault: segredos de um Secret existente (ex.: External Secrets), sem Kong, sem HPA, MFA com chave local.
+environment: dev
+image:
+  repository: ghcr.io/lucas-barbosa-oliveira/node-api-clean-architecture
+  tag: test
+vault:
+  enabled: false
+secrets:
+  existingSecret: api-secrets
+kong:
+  enabled: false
+autoscaling:
+  enabled: false
+migration:
+  enabled: false
+env:
+  MFA_CIPHER: local
+  MFA_ENCRYPTION_KEY_FILE: "@@SECRETS_DIR@@/mfa-encryption-key"
+  VAULT_TRANSIT_MOUNT: ""
+  VAULT_TRANSIT_KEY: ""

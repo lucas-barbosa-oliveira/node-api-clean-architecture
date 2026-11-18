@@ -9,6 +9,7 @@ vault {
 # AppRole: role-id e secret-id gravados por npm run vault:bootstrap (no Kubernetes: token da ServiceAccount)
 auto_auth {
   method "approle" {
+    mount_path = "auth/approle-local" # módulo environment: approle-<ambiente>
     config = {
       role_id_file_path                   = "/vault/approle/role-id"
       secret_id_file_path                 = "/vault/approle/secret-id"

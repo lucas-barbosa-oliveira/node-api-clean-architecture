@@ -4,7 +4,7 @@
 // o Vault usa para gerar usuários temporários. Depois, só autentica e confere se há primário.
 const admin = db.getSiblingDB('admin')
 const user = 'vault-admin'
-const pwd = 'vault-admin-local' // o mesmo de mongodb_password em infra/vault/envs/local.tfvars (desenvolvimento)
+const pwd = 'vault-admin-local' // o mesmo de mongodb_password em dev/vault/main.tf (desenvolvimento)
 
 let authenticated = false
 try {

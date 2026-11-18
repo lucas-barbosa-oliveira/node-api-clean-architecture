@@ -29,6 +29,6 @@ updates:
         update-types: ["version-update:semver-major"]
   # providers do módulo OpenTofu do Vault (mesmo formato de versão do Terraform)
   - package-ecosystem: terraform
-    directory: /infra/vault
+    directory: /dev/vault
     schedule:
       interval: weekly

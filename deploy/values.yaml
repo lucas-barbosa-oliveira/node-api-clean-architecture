@@ -1,0 +1,223 @@
+# Contrato de implantação do serviço para o chart base da plataforma (platform-infra/charts/microservice).
+# O GitOps do projeto (matrixgrid-gitops/apps/api-clean-architecture) soma a estes os values de cada ambiente:
+# imagem (digest), environment, kong.host, kong.jwt.publicKey, réplicas, endereços dos bancos.
+#
+# Marcadores substituídos pelo chart (e pelo scripts/vault.local.ts no ambiente local):
+#   @@VAULT_ENV@@ (dev|hml|prd|local)  @@VAULT_ROLE@@ (matrixgrid-api-clean-architecture)  @@SECRETS_DIR@@ (/vault/secrets)
+
+app:
+  name: api-clean-architecture
+  project: matrixgrid
+
+ports:
+  http: 3000
+  health: 8081
+  metrics: 9464
+
+probes:
+  startup: /health/live
+  liveness: /health/live
+  readiness: /health/ready
+
+serverTls:
+  enabled: true
+
+# Variáveis não secretas. Os endereços dos bancos mudam por ambiente (values do GitOps).
+env:
+  APP_NAME: api-clean-architecture
+  LOG_LEVEL: info
+  LOG_FORMAT: json
+  PORT: "3000"
+  HEALTH_PORT: "8081"
+  OTEL_METRICS_PORT: "9464"
+  OTEL_TRACES_SAMPLER: always_on # a amostragem é por cauda, no Alloy
+  REPOSITORY_DRIVER: mongo
+  MONGO_URI: mongodb://mongodb.matrixgrid.svc.cluster.local:27017/?replicaSet=rs0
+  MONGO_DB: app
+  MONGO_TLS: "true"
+  MONGO_AUTO_INDEX: "false" # índices pelo job de migração
+  QUEUE_DRIVER: redis
+  REDIS_URL: rediss://redis.matrixgrid.svc.cluster.local:6379
+  TIMESERIES_DRIVER: influx
+  INFLUX_URL: https://influxdb.matrixgrid.svc.cluster.local:8086
+  INFLUX_ORG: app
+  INFLUX_BUCKET: sensors
+  EVENT_BUS_DRIVER: rabbitmq
+  RABBITMQ_URI: amqps://rabbitmq.matrixgrid.svc.cluster.local:5671/matrixgrid
+  JWT_ISSUER: api-clean-architecture
+  JWT_AUDIENCE: api-clean-architecture
+  ADMIN_EMAIL: "" # com ADMIN_PASSWORD_FILE (abaixo) cria o admin inicial; defina os dois no ambiente
+  MFA_REQUIRED_ROLES: admin
+  API_DOCS_ENABLED: "false"
+  AUDIT_ENABLED: "true"
+  SECRETS_RELOAD_INTERVAL_MS: "30000"
+  # arquivos entregues pelo Vault Agent (vault.files)
+  MONGO_USERNAME_FILE: "@@SECRETS_DIR@@/mongo-username"
+  MONGO_PASSWORD_FILE: "@@SECRETS_DIR@@/mongo-password"
+  RABBITMQ_USERNAME_FILE: "@@SECRETS_DIR@@/rabbitmq-username"
+  RABBITMQ_PASSWORD_FILE: "@@SECRETS_DIR@@/rabbitmq-password"
+  REDIS_PASSWORD_FILE: "@@SECRETS_DIR@@/redis-password"
+  INFLUX_TOKEN_FILE: "@@SECRETS_DIR@@/influx-token"
+  ADMIN_PASSWORD_FILE: ""
+  JWT_PRIVATE_KEY_PATH: "@@SECRETS_DIR@@/jwt-private-key"
+  JWT_PUBLIC_KEY_PATH: "@@SECRETS_DIR@@/jwt-public-key"
+  TLS_CA_FILE: "@@SECRETS_DIR@@/ca-cert"
+  TLS_CLIENT_CERT_FILE: "@@SECRETS_DIR@@/api-cert"
+  TLS_CLIENT_KEY_FILE: "@@SECRETS_DIR@@/api-key"
+  SERVER_TLS: "true"
+  SERVER_TLS_CERT_FILE: "@@SECRETS_DIR@@/api-cert"
+  SERVER_TLS_KEY_FILE: "@@SECRETS_DIR@@/api-key"
+  SERVER_TLS_CA_FILE: "@@SECRETS_DIR@@/ca-cert"
+  SERVER_TLS_CLIENT_AUTH: require
+  SERVER_TLS_MIN_VERSION: TLSv1.2
+  # MFA cifrado pelo Transit, via proxy do Agent no pod (VAULT_ADDR vem do chart com vault.cache.enabled)
+  MFA_CIPHER: vault-transit
+  VAULT_TRANSIT_MOUNT: "@@VAULT_ENV@@/transit"
+  VAULT_TRANSIT_KEY: "@@VAULT_ROLE@@"
+
+vault:
+  cache:
+    enabled: true # proxy do Agent para o Transit
+  # Fonte única dos templates do Vault Agent: o chart (Kubernetes) e o scripts/vault.local.ts (local) usam estes.
+  # Caminhos: convenção do módulo service da plataforma (platform-infra/vault/modules/service).
+  files:
+    mongo-username:
+      path: "@@VAULT_ENV@@/database/creds/@@VAULT_ROLE@@"
+      template: '{{- with secret "@@VAULT_ENV@@/database/creds/@@VAULT_ROLE@@" }}{{ .Data.username }}{{ end -}}'
+    mongo-password:
+      path: "@@VAULT_ENV@@/database/creds/@@VAULT_ROLE@@"
+      template: '{{- with secret "@@VAULT_ENV@@/database/creds/@@VAULT_ROLE@@" }}{{ .Data.password }}{{ end -}}'
+    rabbitmq-username:
+      path: "@@VAULT_ENV@@/rabbitmq/creds/@@VAULT_ROLE@@"
+      template: '{{- with secret "@@VAULT_ENV@@/rabbitmq/creds/@@VAULT_ROLE@@" }}{{ .Data.username }}{{ end -}}'
+    rabbitmq-password:
+      path: "@@VAULT_ENV@@/rabbitmq/creds/@@VAULT_ROLE@@"
+      template: '{{- with secret "@@VAULT_ENV@@/rabbitmq/creds/@@VAULT_ROLE@@" }}{{ .Data.password }}{{ end -}}'
+    redis-password:
+      path: "@@VAULT_ENV@@/kv/data/@@PROJECT@@/@@SERVICE@@/static"
+      template: '{{- with secret "@@VAULT_ENV@@/kv/data/@@PROJECT@@/@@SERVICE@@/static" }}{{ .Data.data.redis_password }}{{ end -}}'
+    influx-token:
+      path: "@@VAULT_ENV@@/kv/data/@@PROJECT@@/@@SERVICE@@/static"
+      template: '{{- with secret "@@VAULT_ENV@@/kv/data/@@PROJECT@@/@@SERVICE@@/static" }}{{ .Data.data.influx_token }}{{ end -}}'
+    admin-password:
+      path: "@@VAULT_ENV@@/kv/data/@@PROJECT@@/@@SERVICE@@/static"
+      template: '{{- with secret "@@VAULT_ENV@@/kv/data/@@PROJECT@@/@@SERVICE@@/static" }}{{ .Data.data.admin_password }}{{ end -}}'
+    jwt-private-key:
+      path: "@@VAULT_ENV@@/kv/data/@@PROJECT@@/@@SERVICE@@/jwt"
+      template: '{{- with secret "@@VAULT_ENV@@/kv/data/@@PROJECT@@/@@SERVICE@@/jwt" }}{{ .Data.data.private_key }}{{ end -}}'
+    jwt-public-key:
+      path: "@@VAULT_ENV@@/kv/data/@@PROJECT@@/@@SERVICE@@/jwt"
+      template: '{{- with secret "@@VAULT_ENV@@/kv/data/@@PROJECT@@/@@SERVICE@@/jwt" }}{{ .Data.data.public_key }}{{ end -}}'
+    ca-cert:
+      path: pki-root/cert/ca
+      template: '{{- with secret "pki-root/cert/ca" }}{{ .Data.certificate }}{{ end }}'
+    # certificado da API (servidor HTTPS e cliente mTLS): o pkiCert renova sozinho; a chave vai para api-key
+    api-cert:
+      path: "@@VAULT_ENV@@/pki/issue/@@VAULT_ROLE@@"
+      template: |-
+        {{- with pkiCert "@@VAULT_ENV@@/pki/issue/@@VAULT_ROLE@@" "common_name=@@CERT_COMMON_NAME@@" "alt_names=@@CERT_ALT_NAMES@@" "ip_sans=@@CERT_IP_SANS@@" "ttl=@@CERT_TTL@@" -}}
+        {{ .Key | writeToFile "@@SECRETS_DIR@@/api-key" "" "" "@@KEY_PERMS@@" }}
+        {{- .Cert }}{{ .CA }}
+        {{- end -}}
+
+migration:
+  enabled: true
+  command: ["node", "src/main/migrate.ts"]
+  files: [mongo-username, mongo-password, ca-cert, api-cert]
+  # a migração só usa o Mongo: os demais drivers ficam em memória e os arquivos que ela não recebe saem do env
+  envOverrides:
+    TIMESERIES_DRIVER: memory
+    EVENT_BUS_DRIVER: memory
+    QUEUE_DRIVER: in-process
+    ADMIN_EMAIL: ""
+    ADMIN_PASSWORD_FILE: ""
+    RABBITMQ_USERNAME_FILE: ""
+    RABBITMQ_PASSWORD_FILE: ""
+    REDIS_PASSWORD_FILE: ""
+    INFLUX_TOKEN_FILE: ""
+    JWT_PRIVATE_KEY_PATH: ""
+    JWT_PUBLIC_KEY_PATH: ""
+    SERVER_TLS: ""
+    SERVER_TLS_CERT_FILE: ""
+    SERVER_TLS_KEY_FILE: ""
+    SERVER_TLS_CA_FILE: ""
+    SERVER_TLS_CLIENT_AUTH: ""
+    SERVER_TLS_MIN_VERSION: ""
+    MFA_CIPHER: ""
+    VAULT_TRANSIT_MOUNT: ""
+    VAULT_TRANSIT_KEY: ""
+    OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+kong:
+  jwt:
+    issuer: api-clean-architecture
+  routes:
+    - name: health
+      paths: [/health]
+      methods: [GET]
+    - name: jwks
+      paths: [/.well-known/jwks.json]
+      methods: [GET]
+    - name: reference
+      paths: [/reference]
+      methods: [GET]
+      rateLimit: { minute: 120 }
+    - name: auth-login
+      paths: [/auth/login]
+      methods: [POST]
+      rateLimit: { minute: 10, hour: 100 }
+    - name: auth-refresh
+      paths: [/auth/refresh]
+      methods: [POST]
+      rateLimit: { minute: 30 }
+    - name: auth-mfa-verify
+      paths: [/auth/mfa/verify]
+      methods: [POST]
+      rateLimit: { minute: 10, hour: 60 }
+    - name: auth-mfa
+      paths: [/auth/mfa]
+      jwtMaxExpiration: 86400
+      rateLimit: { minute: 20 }
+    - name: devices-claim
+      paths: [/devices/claim]
+      methods: [POST]
+      rateLimit: { minute: 10, hour: 60 }
+    - name: device-telemetry
+      paths: ["~/devices/[^/]+/passages$"]
+      methods: [POST]
+      regexPriority: 10
+      jwtMaxExpiration: 31536000
+      rateLimit: { minute: 120 }
+    - name: protected
+      paths: [/users, /clients, /jobs, /reports, /auth/logout, /auth/sessions, /devices, /passages]
+      jwtMaxExpiration: 86400
+      rateLimit: { minute: 300 }
+
+metrics:
+  prometheusRule:
+    enabled: true
+    # alertas próprios da API (os de SLO o chart gera); mesmas regras de observability/grafana/alerting/api.yaml
+    extraRules:
+      - alert: ApiOutboxStuck
+        expr: 'max(outbox_oldest_pending_age_seconds{ {{ include "microservice.metricsSelector" . }} }) > 300'
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: Eventos parados no outbox há mais de 5 minutos (RabbitMQ fora do ar ou evento recusado)
+      - alert: ApiDeadLetteredMessages
+        expr: 'sum(increase(eventbus_dead_lettered_total{ {{ include "microservice.metricsSelector" . }} }[15m])) > 0'
+        labels: { severity: warning }
+        annotations:
+          summary: Mensagens foram para a fila <serviço>.dlq (subscriber falhou em todas as tentativas)
+      - alert: ApiJobsFailing
+        expr: 'sum(rate(jobs_completed_total{ {{ include "microservice.metricsSelector" . }},status="failed"}[30m])) / clamp_min(sum(rate(jobs_completed_total{ {{ include "microservice.metricsSelector" . }} }[30m])), 1e-9) > 0.1'
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Mais de 10% dos jobs falhando
+      - alert: ApiEventLoopLag
+        expr: 'max(nodejs_eventloop_delay_p99_seconds{ {{ include "microservice.metricsSelector" . }} }) > 0.2'
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Event loop com atraso p99 acima de 200 ms

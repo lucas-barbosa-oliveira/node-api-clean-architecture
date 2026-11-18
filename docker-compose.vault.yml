@@ -4,8 +4,8 @@
 #   npm run docker:up:vault     tudo em containers (https://localhost:8443 pelo Kong)
 #   npm run docker:infra:vault  dependências; a API roda no host com npm run dev:docker:vault
 #
-# Os dois rodam scripts/vault.local.ts, que recria o Vault (modo dev, em memória), aplica infra/vault com OpenTofu
-# (envs/local.tfvars) e só então sobe o resto. Do Vault vêm:
+# Os dois rodam scripts/vault.local.ts, que recria o Vault (modo dev, em memória), aplica dev/vault com OpenTofu (os
+# módulos da plataforma no ambiente "local") e só então sobe o resto. Do Vault vêm:
 #   - certificados de Mongo, Redis, RabbitMQ, InfluxDB e Kong (PKI, gravados em certs/ como no tls:setup);
 #   - para a API, pelo Vault Agent (.vault/secrets): usuário temporário do Mongo e do RabbitMQ, senha do Redis, token
 #     do InfluxDB, senha do admin, chaves dos JWTs e o próprio certificado (renovado sozinho);
@@ -103,7 +103,7 @@ services:
       - --maxmemory-policy
       - noeviction
       - --requirepass
-      - redis-local-pass # o mesmo de static_secrets.redis_password em infra/vault/envs/local.tfvars
+      - redis-local-pass # o mesmo de static_secrets.redis_password em dev/vault/main.tf
       - --port
       - "0"
       - --tls-port
@@ -147,6 +147,8 @@ services:
       # MFA cifrado pelo Transit, via proxy do Agent (MFA_ENCRYPTION_KEY continua só para ler segredos antigos)
       MFA_CIPHER: vault-transit
       VAULT_ADDR: http://vault-agent:8100
+      VAULT_TRANSIT_MOUNT: local/transit # convenção da plataforma: <ambiente>/transit, chave <projeto>-<serviço>
+      VAULT_TRANSIT_KEY: matrixgrid-api-clean-architecture
       # índices pelo job de migração, como no Kubernetes (scripts/vault.local.ts roda npm run db:migrate)
       MONGO_AUTO_INDEX: "false"
     volumes: !override

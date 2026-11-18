@@ -21,7 +21,6 @@ certs/
 *.tfstate
 *.tfstate.*
 *.tfvars
-!infra/vault/envs/local.tfvars
 kong/kong.yml
 
 # Build e cobertura

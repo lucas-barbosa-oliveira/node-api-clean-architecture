@@ -5,7 +5,7 @@
 #   tls          o mesmo ambiente com TLS em tudo (docker-compose.tls.yml): testes de integração e fumaça em HTTPS
 #   vault        o ambiente com Vault (OpenTofu + Vault Agent): testes de integração e fumaça, como no Kubernetes
 #   security     dependências (npm audit), Trivy no repositório (vulnerabilidades, segredos, IaC) e na imagem
-#   iac          OpenTofu (fmt/validate do módulo infra/vault) e Helm (lint, template, kubeconform)
+#   iac          OpenTofu (dev/vault) e Helm: chart base da plataforma + deploy/values.yaml (lint, template, kubeconform)
 # SAST (CodeQL) fica em codeql.yml.
 name: CI
 
@@ -150,7 +150,7 @@ jobs:
           tofu_wrapper: false
       - run: npm ci
       - run: echo "HOST_UID=$(id -u)" >> "$GITHUB_ENV" && echo "HOST_GID=$(id -g)" >> "$GITHUB_ENV"
-      - name: Ambiente completo com Vault (módulo infra/vault aplicado pelo OpenTofu)
+      - name: Ambiente completo com Vault (dev/vault aplicado pelo OpenTofu)
         run: npm run docker:up:vault
       - name: Pronta pelo Kong; usuário do Mongo criado pelo Vault; MFA pelo Transit
         run: |
@@ -221,30 +221,41 @@ jobs:
     name: OpenTofu e Helm
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PLATFORM_REPO_TOKEN: ${{ secrets.PLATFORM_REPO_TOKEN }}
     steps:
       - uses: actions/checkout@v5
       - uses: opentofu/setup-opentofu@v2
         with:
           tofu_wrapper: false
-      - name: OpenTofu (formato e validação do módulo do Vault)
+      - name: OpenTofu (Vault local, com os módulos da plataforma)
         run: |
-          tofu fmt -check -recursive infra
-          tofu -chdir=infra/vault init -backend=false -input=false
-          tofu -chdir=infra/vault validate
+          tofu fmt -check -recursive dev
+          tofu -chdir=dev/vault init -backend=false -input=false
+          tofu -chdir=dev/vault validate
+      # chart base no repositório da plataforma (privado): precisa do segredo PLATFORM_REPO_TOKEN (leitura)
+      - uses: actions/checkout@v5
+        if: env.PLATFORM_REPO_TOKEN != ''
+        with:
+          repository: ${{ github.repository_owner }}/platform-infra
+          token: ${{ secrets.PLATFORM_REPO_TOKEN }}
+          path: platform-infra
       - uses: azure/setup-helm@v4
-      - name: Helm lint e template
+        if: env.PLATFORM_REPO_TOKEN != ''
+      - name: Helm (chart base + deploy/values.yaml) e kubeconform
+        if: env.PLATFORM_REPO_TOKEN != ''
         run: |
           set -euo pipefail
-          chart=deploy/helm/api-clean-architecture
-          for values in $chart/ci/*.yaml; do
-            helm lint $chart -f $values
-            helm template api $chart -n api -f $values > "rendered-$(basename $values)"
-          done
-      - name: kubeconform (schemas do Kubernetes e das CRDs do Kong e do Prometheus Operator)
-        run: |
-          set -euo pipefail
+          chart=platform-infra/charts/microservice
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
-          ./kubeconform -strict -summary -kubernetes-version 1.30.0 \
+          for env in test/fixtures/helm/*.yaml; do
+            helm lint $chart -f deploy/values.yaml -f $env
+            helm template api-clean-architecture $chart -n matrixgrid -f deploy/values.yaml -f $env > "rendered-$(basename $env)"
+          done
+          ./kubeconform -strict -summary -kubernetes-version 1.31.0 \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
             rendered-*.yaml
+      - name: Aviso (sem acesso ao chart base)
+        if: env.PLATFORM_REPO_TOKEN == ''
+        run: echo "::notice::Validação Helm ignorada - defina o segredo PLATFORM_REPO_TOKEN (leitura de platform-infra)"

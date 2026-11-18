@@ -1,0 +1,47 @@
+# Política de ${role} (gerada pelo módulo service). Só os próprios caminhos.
+
+path "${kv}/data/${kv_path}/*" {
+  capabilities = ["read"]
+}
+
+path "${pki}/issue/${role}" {
+  capabilities = ["update"]
+}
+
+path "${root_pki}/cert/ca" {
+  capabilities = ["read"]
+}
+%{ if database != null ~}
+
+path "${database}/creds/${role}" {
+  capabilities = ["read"]
+}
+%{ endif ~}
+%{ if rabbitmq != null ~}
+
+path "${rabbitmq}/creds/${role}" {
+  capabilities = ["read"]
+}
+%{ endif ~}
+%{ if transit != null ~}
+
+path "${transit}/encrypt/${role}" {
+  capabilities = ["update"]
+}
+
+path "${transit}/decrypt/${role}" {
+  capabilities = ["update"]
+}
+
+path "${transit}/rewrap/${role}" {
+  capabilities = ["update"]
+}
+
+path "${transit}/keys/${role}" {
+  capabilities = ["read"]
+}
+%{ endif ~}
+
+path "sys/leases/renew" {
+  capabilities = ["update"]
+}

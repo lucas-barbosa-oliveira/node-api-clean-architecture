@@ -56,8 +56,8 @@ Todas as dependências externas são opcionais. Sem Docker, a API roda inteira e
 | Autenticação | JWT RS256 (`jose`), refresh token opaco com rotação, senhas com `scrypt` (nativo do Node) |
 | Gateway | Kong 3.9: DB-less no ambiente local; Kong Ingress Controller ≥ 3.4 no Kubernetes |
 | Segredos e PKI | HashiCorp Vault 1.20 (ou OpenBao): KV, PKI, credenciais dinâmicas do MongoDB e do RabbitMQ, Transit; entregues pelo Vault Agent |
-| Infraestrutura como código | OpenTofu ≥ 1.8 (módulo `infra/vault`), com estado cifrado |
-| Implantação | Kubernetes ≥ 1.27 e Helm 3 (`deploy/helm/api-clean-architecture`) |
+| Infraestrutura como código | OpenTofu ≥ 1.8: módulos do Vault em `platform-infra` (cópia local em `dev/vault`) |
+| Implantação | Kubernetes ≥ 1.27, chart base da plataforma (`deploy/values.yaml` é o contrato), Argo CD e GitOps (`matrixgrid-gitops`) |
 | Query string | `query-strings-parser` |
 | Observabilidade | OpenTelemetry SDK; Grafana LGTM (Tempo, Prometheus, Loki e Grafana) |
 | Documentação | OpenAPI 3.1 gerado do código, Swagger UI (`swagger-ui-dist`) em `/reference` |
@@ -369,20 +369,19 @@ As combinações são livres, exceto `redis` + `memory`, que é recusada na inic
 │   │                                 openapi, este validando cada resposta contra o documento)
 │   ├── integration/                  Contra as dependências reais: BullMQ, InfluxDB, RabbitMQ (com DLQ), outbox no
 │   │                                 Mongo, reconexão e migração de índices (reload.test.ts)
-│   └── helpers/                      makeApp (app com banco e fila próprios), fixtures, waitForJob, waitUntil,
-│                                     connections.ts (TLS e credenciais do ambiente para conexões diretas), mfa.ts
+│   ├── helpers/                      makeApp (app com banco e fila próprios), fixtures, waitForJob, waitUntil,
+│   │                                 connections.ts (TLS e credenciais do ambiente para conexões diretas), mfa.ts
+│   └── fixtures/helm/                Ambientes de exemplo (dev, sem Vault) para o teste de contrato com o chart base
 │
 ├── kong/
 │   ├── kong.template.yml             Configuração do gateway (versionada), com placeholders
 │   └── kong.yml                      Gerado por npm run kong:setup (fora do git)
-├── infra/
-│   ├── vault/                        Módulo OpenTofu do Vault: KV, PKI, database, rabbitmq, transit, políticas,
-│   │                                 Kubernetes auth e AppRole; envs/local.tfvars e exemplo de produção (README)
-│   └── local/mongo/healthcheck.js    Modo Vault local: inicia o replica set e cria o administrador usado pelo Vault
+├── infra/local/mongo/healthcheck.js  Modo Vault local: inicia o replica set e cria o administrador usado pelo Vault
+├── dev/vault/                        Vault LOCAL (OpenTofu): main.tf com o ambiente "local" e modules/, cópia dos
+│                                     módulos de platform-infra (npm run vault:sync-modules)
 ├── deploy/
-│   ├── helm/api-clean-architecture/  Chart Helm (Deployment, job de migração, Kong Ingress Controller, HPA, PDB,
-│   │                                 NetworkPolicy, ServiceMonitor, PrometheusRule); files/vault: templates do
-│   │                                 Vault Agent (fonte única, também usados no ambiente local); README para o DevOps
+│   ├── values.yaml                   Contrato com o chart base da plataforma: env, arquivos e templates do Vault Agent
+│   │                                 (fonte única, também usada no ambiente local), migração, rotas do Kong, alertas
 │   └── vault-agent/agent.local.hcl   Configuração do Vault Agent local (container vault-agent)
 ├── observability/
 │   ├── grafana/dashboards/api.json   Dashboard da API (SLOs, HTTP, outbox e DLQ, jobs, runtime, logs e traces)
@@ -395,12 +394,15 @@ As combinações são livres, exceto `redis` + `memory`, que é recusada na inic
 │   ├── setup.kong.ts                 Gera as chaves JWT (se faltarem) e kong/kong.yml (com TLS até a API se https)
 │   ├── setup.tls.ts                  Gera a CA local e os certificados de cada serviço em certs/
 │   ├── tls.certificates.ts           Geração com openssl (usada pelo setup e pelos testes)
+│   ├── sync.vault.modules.ts         Copia os módulos do Vault de ../platform-infra para dev/vault/modules
 │   └── vault.local.ts                Modo Vault local: recria o Vault, aplica o módulo OpenTofu, gera a configuração
 │                                     do Agent, migra os índices e sobe os serviços na ordem
 ├── keys/                             Par de chaves RSA dos JWTs (gerado, fora do git)
 ├── certs/                            CA e certificados TLS (gerados por npm run tls:setup ou pelo Vault; fora do git)
 ├── .vault/                           Modo Vault local: segredos entregues pelo Agent, AppRole, estado (fora do git)
-├── .github/                          workflows/ci.yml, workflows/codeql.yml e dependabot.yml
+├── .gitlab-ci.yml                    CI no GitLab (destino): componentes de platform/ci-templates e promoção GitOps
+├── renovate.json                     Renovate (no GitLab, no lugar do Dependabot), com o preset da plataforma
+├── .github/                          workflows/ci.yml, workflows/codeql.yml e dependabot.yml (transição, enquanto no GitHub)
 ├── .trivyignore                      Achados do Trivy aceitos (com motivo)
 ├── Dockerfile / .dockerignore        Imagem da API (sem build; Node executa src/ direto)
 ├── docker-compose.yml                Mongo, Redis, InfluxDB, RabbitMQ, LGTM, Prometheus (opcional), API e Kong
@@ -427,8 +429,8 @@ As combinações são livres, exceto `redis` + `memory`, que é recusada na inic
 | Docker + Docker Compose | modos com dependências reais | Compose v2 (`docker compose`) |
 | Espaço em disco | modo completo | ~6 GB para as imagens (o LGTM sozinho tem ~2,7 GB) |
 | OpenSSL | modo com TLS (gera os certificados) | qualquer versão atual (`openssl version`) |
-| OpenTofu | modo com Vault (aplica `infra/vault`) | ≥ 1.8 (`tofu version`) |
-| Helm (opcional) | validar o chart e o teste de contrato `helm.test.ts` | 3.x |
+| OpenTofu | modo com Vault (aplica `dev/vault`) | ≥ 1.8 (`tofu version`) |
+| Helm e `../platform-infra` (opcional) | teste de contrato com o chart base (`helm.test.ts`) | 3.x |
 
 ```bash
 git clone https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture.git
@@ -536,7 +538,7 @@ Os detalhes (o que cifra cada trecho, variáveis, certificados) estão em [TLS: 
 #### 7. Com Vault (como no Kubernetes)
 
 ```bash
-npm run docker:up:vault      # recria o Vault (dev), aplica infra/vault com OpenTofu, sobe tudo com TLS
+npm run docker:up:vault      # recria o Vault (dev), aplica dev/vault com OpenTofu, sobe tudo com TLS
 # ou, com a API no host:
 npm run docker:infra:vault   # dependências, Vault e Vault Agent
 npm run dev:docker:vault     # API no host com .env.docker + .env.tls + .env.vault
@@ -886,33 +888,33 @@ A API relê os certificados sozinha a cada `SECRETS_RELOAD_INTERVAL_MS` (30 s), 
 ## Segredos e certificados com Vault (OpenTofu)
 
 Em produção (Kubernetes), nenhum segredo fica em variável de ambiente, imagem ou repositório.
-- **Origem:** tudo vem do **Vault**, configurado como código pelo módulo **OpenTofu** [`infra/vault`](infra/vault/README.md).
-- **Entrega:** o **Vault Agent** grava os segredos como arquivos para a API.
-- **Ambiente local:** o modo 7 (`npm run docker:up:vault`) reproduz esse caminho, com o mesmo módulo e os mesmos templates do Agent.
+- **Origem:** tudo vem do **Vault**, configurado como código pelo repositório **`platform-infra`** (módulos OpenTofu `vault/modules`; o serviço é declarado em `vault/projects/matrixgrid.yaml`).
+- **Entrega:** o **Vault Agent** grava os segredos como arquivos, e a API os lê pela convenção `<VAR>_FILE`.
+- **Ambiente local:** o modo 7 (`npm run docker:up:vault`) usa **os mesmos módulos**, copiados em `dev/vault/modules`, num ambiente chamado `local`. Os caminhos são os mesmos do Kubernetes; só muda o prefixo.
 
 ```
-                 OpenTofu (infra/vault)                        Kubernetes / docker-compose.vault.yml
-                 ──────────────────────                        ─────────────────────────────────────
- desenvolvedor ─► envs/local.tfvars ──┐                        ┌─ pod / containers ─────────────────────────┐
- pipeline      ─► variáveis do DevOps ┴► Vault ◄── auth ───────┤ Vault Agent ──► /vault/secrets/* (arquivos)│
-                                        ├ KV: estáticos         │   (renova)        │                        │
-                                        ├ PKI: raiz + intermed. │                   ▼  *_FILE, *_PATH        │
-                                        ├ database: Mongo       │   proxy :8200 ◄── API ──► Mongo, Redis,    │
-                                        ├ rabbitmq              │   (Transit)            RabbitMQ, InfluxDB  │
-                                        └ transit: MFA          └────────────────────────────────────────────┘
+ platform-infra (plataforma)                       este repositório (serviço)
+ ──────────────────────────                        ──────────────────────────
+ vault/modules  ── cópia (npm run vault:sync-modules) ──► dev/vault/modules ──► dev/vault/main.tf (ambiente "local")
+ vault/live/{nonprod,prd} + projects/matrixgrid.yaml     deploy/values.yaml: vault.files (templates do Agent)
+        │                                                       │
+        ▼                                                       ▼
+ Vault dev/hml/prd ◄── Agent Injector (chart base) ◄── mesmos templates ──► container vault-agent (local)
 ```
 
-### O que vem do Vault
+### Convenção de caminhos (papel `matrixgrid-api-clean-architecture`)
 
-| Segredo | Antes (modos 1 a 6) | Com o Vault |
-|---|---|---|
-| Usuário do MongoDB | Sem usuário (local) | **Temporário, por instância** (`database/creds/api`): expira em 1 h (renovado pelo Agent, até 24 h) e é revogado quando a instância some |
-| Usuário do RabbitMQ | `app` / `app-rabbit-local` fixo | **Temporário, por instância** (`rabbitmq/creds/api`), só no vhost do serviço |
-| Senha do Redis, token do InfluxDB, senha do admin | `.env` | KV (`kv/api/static`) |
-| Chaves dos JWTs | `keys/` (geradas pelo `kong:setup`) | KV (`kv/api/jwt`), geradas pelo OpenTofu; a pública vai para o Kong |
-| Certificado da API | `certs/api.crt` (825 dias) | PKI intermediária (`pki_int/issue/api`), **72 h**, renovado sozinho pelo Agent (`pkiCert`) |
-| Certificados de Mongo, Redis, RabbitMQ, InfluxDB e Kong | `npm run tls:setup` | PKI (papel `infra`): no local, emitidos pelo OpenTofu em `certs/`; no Kubernetes, pelo cert-manager com emissor Vault |
-| Cifra dos segredos do MFA | `MFA_ENCRYPTION_KEY` | Transit (`transit/keys/mfa`): a chave não sai do Vault |
+| Segredo | Caminho no Vault | Arquivo entregue | Variável da API |
+|---|---|---|---|
+| Usuário temporário do MongoDB | `<env>/database/creds/<papel>` | `mongo-username`, `mongo-password` | `MONGO_USERNAME_FILE`, `MONGO_PASSWORD_FILE` |
+| Usuário temporário do RabbitMQ | `<env>/rabbitmq/creds/<papel>` | `rabbitmq-username`, `rabbitmq-password` | `RABBITMQ_USERNAME_FILE`, `RABBITMQ_PASSWORD_FILE` |
+| Senha do Redis, token do InfluxDB, senha do admin | `<env>/kv/data/matrixgrid/api-clean-architecture/static` | `redis-password`, `influx-token`, `admin-password` | `REDIS_PASSWORD_FILE`, `INFLUX_TOKEN_FILE`, `ADMIN_PASSWORD_FILE` |
+| Chaves dos JWTs | `<env>/kv/data/matrixgrid/api-clean-architecture/jwt` | `jwt-private-key`, `jwt-public-key` | `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH` |
+| CA raiz | `pki-root/cert/ca` | `ca-cert` | `TLS_CA_FILE`, `SERVER_TLS_CA_FILE` |
+| Certificado da API (72 h, renovado sozinho) | `<env>/pki/issue/<papel>` | `api-cert`, `api-key` | `SERVER_TLS_*`, `TLS_CLIENT_*` |
+| Cifra do MFA | `<env>/transit`, chave `<papel>` | (proxy do Agent) | `MFA_CIPHER=vault-transit`, `VAULT_TRANSIT_MOUNT`, `VAULT_TRANSIT_KEY` |
+
+`<env>` é `dev`, `hml` ou `prd` no Kubernetes e `local` aqui.
 
 ### Como a API recebe
 
@@ -920,75 +922,73 @@ Em produção (Kubernetes), nenhum segredo fica em variável de ambiente, imagem
   - Variáveis suportadas: `MONGO_URI`, `MONGO_USERNAME`, `MONGO_PASSWORD`, `REDIS_URL`, `REDIS_USERNAME`, `REDIS_PASSWORD`, `RABBITMQ_URI`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`, `INFLUX_TOKEN`, `ADMIN_PASSWORD`, `MFA_ENCRYPTION_KEY` e `MFA_ENCRYPTION_PREVIOUS_KEYS`.
   - Os certificados e as chaves dos JWTs já eram caminhos de arquivo.
 - **Funciona com qualquer fonte de arquivos:** Vault Agent, Vault Secrets Operator, External Secrets ou um Secret comum.
-- **Credenciais fora da URI:** `MONGO_USERNAME`/`MONGO_PASSWORD` (com `MONGO_AUTH_SOURCE`, padrão `admin`), `REDIS_USERNAME`/`REDIS_PASSWORD` e `RABBITMQ_USERNAME`/`RABBITMQ_PASSWORD` substituem as da URI. Assim as URIs viram configuração comum (não secreta).
-- **Troca sem reiniciar:** quando o Agent grava valores novos (renovação, credencial nova, certificado novo), a API percebe em até `SECRETS_RELOAD_INTERVAL_MS` e refaz só a conexão afetada (veja [Conexões e reconexões](#conexões-e-reconexões)).
-- **Transit pelo proxy do Agent:** `VAULT_ADDR` aponta para o Agent (no pod, `http://127.0.0.1:8200`), que injeta o token. Fora do Kubernetes, `VAULT_TOKEN_FILE` lê o token de um arquivo (*sink* do Agent).
+- **Troca sem reiniciar:** quando o Agent grava valores novos, a API percebe em até `SECRETS_RELOAD_INTERVAL_MS` e refaz só a conexão afetada (veja [Conexões e reconexões](#conexões-e-reconexões)).
+- **Transit pelo proxy do Agent:** `VAULT_ADDR` aponta para o Agent (no pod, `http://127.0.0.1:8200`), que injeta o token.
 
 ### Os templates do Agent: fonte única
 
-[`deploy/helm/api-clean-architecture/files/vault/`](deploy/helm/api-clean-architecture/files/vault/README.md) tem um template por arquivo entregue. Eles são usados:
-- pelo chart, nas anotações do Agent Injector;
+Os templates ficam em `vault.files` do [`deploy/values.yaml`](deploy/values.yaml). Eles são usados:
+- pelo chart base, nas anotações do Agent Injector;
 - pelo `scripts/vault.local.ts`, que gera a configuração do container `vault-agent`.
 
-Os marcadores `@@...@@` (nomes do certificado, validade, permissões) são preenchidos por quem usa. Segredo novo = template novo + linha em `vault.secrets` do chart + caminho na política do módulo.
+Os marcadores (`@@VAULT_ENV@@`, `@@VAULT_ROLE@@`, `@@SECRETS_DIR@@`, nomes e validade do certificado) são preenchidos por quem usa.
 
-### O módulo OpenTofu
-
-Veja [`infra/vault/README.md`](infra/vault/README.md): recursos criados, variáveis e como aplicar em um ambiente.
-- **Ambientes:** local, aplicado com `envs/local.tfvars` num Vault dev descartável; produção, pelo pipeline com as variáveis do DevOps.
-- **Senhas de administração:** vêm de `TF_VAR_*`.
-- **Segredos estáticos de produção:** são gravados com `vault kv put`, fora do código e do estado.
-- **Estado:** cifrado pelo OpenTofu (`TF_ENCRYPTION`), porque contém a chave dos JWTs quando gerada no módulo.
+**Segredo novo:** template em `vault.files`, variável em `env` e, se for estático, o nome no `projects/matrixgrid.yaml` da plataforma.
 
 ### Ambiente local, passo a passo (`scripts/vault.local.ts`)
 
 1. Recria o container `vault` (modo dev, em memória, token `dev-root-token`).
-2. Gera `.vault/agent.hcl` e `.vault/templates/` a partir dos templates do chart.
-3. Aplica `infra/vault` com `envs/local.tfvars`, com o estado em `.vault/` (descartado a cada subida). O módulo grava:
+2. Gera `.vault/agent.hcl` e `.vault/templates/` a partir de `vault.files` do `deploy/values.yaml`, com o ambiente `local`.
+3. Aplica `dev/vault` (módulos da plataforma) com o estado em `.vault/`, descartado a cada subida. O OpenTofu grava:
    - os certificados dos serviços em `certs/`, com os mesmos nomes do `tls:setup`;
    - o AppRole do Agent em `.vault/approle`;
    - a chave pública dos JWTs.
 4. Recria Mongo (com autenticação e keyfile, volume `mongo-vault-data`), Redis (com senha), RabbitMQ e InfluxDB com os certificados novos. O healthcheck do Mongo cria o administrador que o Vault usa.
-5. Sobe o `vault-agent`, que grava `.vault/secrets/*`.
+5. Sobe o `vault-agent` (AppRole `approle-local`), que grava `.vault/secrets/*`.
 6. Roda a migração de índices (`src/main/migrate.ts`), como o job do deploy.
 7. Gera o `kong.yml` (upstream HTTPS, chave pública do Vault) e sobe LGTM, API e Kong.
+
+**Módulos desatualizados?** `npm run vault:sync-modules` copia a versão atual de `../platform-infra/vault/modules` (ou de `PLATFORM_INFRA_DIR`).
 
 **Inspecionar:**
 - interface do Vault em `http://localhost:8200` (token `dev-root-token`);
 - `docker compose -f docker-compose.yml -f docker-compose.tls.yml -f docker-compose.vault.yml logs vault-agent`;
 - `ls .vault/secrets`.
 
-O log da API mostra o usuário temporário: `Conectando ao MongoDB em ... como "v-approle-api-..."`.
+O log da API mostra o usuário temporário: `Conectando ao MongoDB em ... como "v-approle-matrixgrid-..."`.
 
 ---
 
 ## Implantação no Kubernetes (Helm)
 
-O chart [`deploy/helm/api-clean-architecture`](deploy/helm/api-clean-architecture/README.md) é a entrega para o deploy automatizado. O README dele detalha o que precisa existir no cluster e todos os valores.
+Este repositório **não tem chart próprio**. A implantação é dividida entre três repositórios:
 
-```bash
-helm upgrade --install api deploy/helm/api-clean-architecture -n api --create-namespace \
-  -f values-production.yaml --set image.tag=$GIT_SHA --wait --timeout 10m
-```
+| Repositório | O que tem sobre este serviço |
+|---|---|
+| **este** (`node-api-clean-architecture`) | [`deploy/values.yaml`](deploy/values.yaml): o contrato do serviço com o chart base (variáveis, arquivos e templates do Vault, migração, rotas do Kong, alertas próprios) |
+| **`platform-infra`** | o chart base `charts/microservice` (publicado como OCI), os módulos do Vault e a declaração do serviço em `vault/projects/matrixgrid.yaml` |
+| **`matrixgrid-gitops`** | `apps/api-clean-architecture/`: os values de cada ambiente (digest da imagem, host, réplicas, chave pública dos JWTs) e a revisão deste repositório em uso |
+
+O Argo CD (cluster de governança) monta cada ambiente com essas três fontes: chart base + `deploy/values.yaml` (na revisão promovida) + values do ambiente.
+
+**O que o chart base cria para o serviço:**
 
 | Recurso | O que faz |
 |---|---|
 | `Deployment` | API com o Vault Agent injetado. Probes na porta de saúde (8081, HTTP): `/health/live` e `/health/ready`. `preStop` de 5 s. Usuário 1000, sistema de arquivos somente leitura, sem *capabilities*, `RuntimeDefault` |
-| `Job` `<release>-migrate` | Hook `pre-install,pre-upgrade`: `npm run db:migrate` antes de cada versão; as réplicas sobem com `MONGO_AUTO_INDEX=false`. ServiceAccount própria, também no papel do Vault |
-| `Service` | Porta da API (HTTPS) e de métricas; anotações do Kong para HTTPS verificado e certificado de cliente até a API |
-| `Ingress` + `KongPlugin` + `KongConsumer` | Uma rota por entrada de `kong.routes` (as mesmas do `kong.template.yml`): JWT (24 h ou 1 ano), rate limit **no Redis** (o limite vale para todas as réplicas do Kong), correlation id, limite de payload e traces |
-| `HorizontalPodAutoscaler` / `PodDisruptionBudget` | 2 a 6 réplicas por CPU; ao menos 1 disponível em manutenções |
-| `NetworkPolicy` | A porta da API só a partir do namespace do Kong; métricas só do monitoramento |
-| `ServiceMonitor` / `PrometheusRule` | Opcionais (Prometheus Operator): coleta de `/metrics` e os alertas de SLO |
+| `Job` `api-clean-architecture-migrate` | Hook `pre-install,pre-upgrade`: `node src/main/migrate.ts` antes de cada versão; as réplicas sobem com `MONGO_AUTO_INDEX=false` |
+| `Service` + `Ingress`/`KongPlugin`/`KongConsumer` | Uma rota por item de `kong.routes`: JWT, rate limit no Redis, correlation id, limite de payload e traces; upstream HTTPS com mTLS |
+| `HorizontalPodAutoscaler` / `PodDisruptionBudget` / `NetworkPolicy` | 2 a 6 réplicas; ao menos 1 disponível; só Kong, monitoramento e o próprio projeto alcançam a API |
+| `PrometheusRule` | SLOs (gerados pelo chart) e os alertas próprios de `metrics.prometheusRule.extraRules` |
 
-**Fluxo de entrega sugerido** (GitHub Actions ou GitOps com Argo CD):
+**Validação local do contrato:** `npm test` inclui `test/unit/helm.test.ts`, que renderiza o chart base com `deploy/values.yaml` e os ambientes de `test/fixtures/helm/`, validando o env gerado com o próprio `loadEnv` da API. O chart é procurado em `PLATFORM_CHART_DIR` ou em `../platform-infra/charts/microservice`; sem ele, o teste é ignorado.
 
-1. CI verde: testes, segurança, IaC e Vault.
-2. Publicar a imagem com a tag do commit (`ghcr.io/...:$GIT_SHA`).
-3. Pipeline da plataforma:
-   - `tofu apply` do módulo `infra/vault` no Vault do ambiente, quando o módulo mudar;
-   - `helm upgrade --install --wait` com a tag nova (o job de migração roda antes das réplicas).
-4. `--wait` falhou (migração com erro ou pods sem readiness): o Helm não conclui, e o `helm rollback` volta à versão anterior.
+**Fluxo de entrega** (git-flow, componentes de `ci-templates`, ver [Integração contínua](#integração-contínua)):
+
+1. Merge request: qualidade, segurança, Helm, integração (runner dedicado).
+2. `develop`: imagem construída **uma vez** (Buildah, Trivy, SBOM, cosign) e promovida para **dev** (commit no GitOps).
+3. `release/*`: nova imagem promovida para **homologação** (MR no GitOps).
+4. Tag `vX.Y.Z` em `main`: MR copiando o digest de homologação para **produção**, com aprovação (`CODEOWNERS`) e sync manual no Argo CD.
 
 ---
 
@@ -1455,7 +1455,7 @@ Para desligar (ex.: em produção), use `API_DOCS_ENABLED=false`.
 | Os mesmos, com TLS | `test/http/` e `test/integration/` | as dependências do `docker-compose.tls.yml` | `npm run test:docker:tls` |
 | TLS | `test/unit/tls.test.ts` | `openssl` (ignorado sem ele) | `npm test`: validação das variáveis, HTTPS com mTLS e recarga do certificado |
 | Segredos e Vault | `test/unit/secrets.test.ts`, `test/unit/mfa.test.ts` | nenhuma (Vault falso em memória) | `npm test`: `<VAR>_FILE`, recarga por conteúdo, Transit (cifra, *rewrap*, migração da chave local, 503) |
-| Chart Helm | `test/unit/helm.test.ts` | `helm` (ignorado sem ele) | `npm test`: renderiza o chart e valida o `env` com o `loadEnv` da API; cada arquivo esperado tem template no Agent |
+| Chart base | `test/unit/helm.test.ts` | `helm` e o chart base em `../platform-infra` ou `PLATFORM_CHART_DIR` (ignorado sem eles) | `npm test`: renderiza o chart base com `deploy/values.yaml` e valida o `env` com o `loadEnv` da API; cada arquivo esperado tem template no Agent |
 | Reconexão e migração | `test/integration/reload.test.ts` | MongoDB e Redis | `npm run test:docker`: reconexão com credenciais novas e migração de índices idempotente |
 | Tudo, com Vault | `test/http/` e `test/integration/` | o ambiente do `docker:infra:vault` | `npm run test:docker:vault`: credenciais temporárias, PKI e Transit reais |
 
@@ -1468,7 +1468,20 @@ Para desligar (ex.: em produção), use `API_DOCS_ENABLED=false`.
 
 ## Integração contínua
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda a cada push em `main`/`develop` e em todo pull request:
+**Destino: GitLab** ([`.gitlab-ci.yml`](.gitlab-ci.yml)), com os componentes do repositório `ci-templates` da plataforma (uma correção lá vale para todos os serviços) e o git-flow:
+
+| Evento | Jobs |
+|---|---|
+| Merge request | `node-quality` (lint, typecheck, testes), `security` (npm audit, Trivy, SAST e Secret Detection do GitLab), `helm-validate` (chart base + `deploy/values.yaml` + kubeconform), `tofu-validate` (`dev/vault`), `integration`, `integration-tls` e `integration-vault` |
+| `develop` | + `container-image` (Buildah sem privilégio, Trivy, SBOM, cosign) e `promote-dev` (commit no GitOps) |
+| `release/*` | + `container-image` e `promote-hml` (MR no GitOps) |
+| tag `vX.Y.Z` | `promote-prd`: MR copiando digest e revisão de homologação para produção |
+| agendado | `renovate` (preset `platform/ci-templates:renovate-preset`) |
+
+- **Integração:** os jobs com Docker Compose rodam no **runner dedicado** (VM do Proxmox, tag `docker-host`), nunca como pod privilegiado no cluster.
+- **Credenciais:** `GITOPS_TOKEN` (escrita no `matrixgrid-gitops`) e `RENOVATE_TOKEN`, no grupo; o acesso ao Vault é por JWT do GitLab.
+
+**Transição (enquanto o repositório está no GitHub):** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) continua rodando a cada push em `main`/`develop` e em todo pull request:
 
 | Job | O que faz |
 |---|---|
@@ -1476,12 +1489,12 @@ Para desligar (ex.: em produção), use `API_DOCS_ENABLED=false`.
 | `integration` | Sobe MongoDB (replica set), Redis, InfluxDB e RabbitMQ e roda `npm run test:docker` |
 | `image` | `npm run docker:up` (build + ambiente completo, incluindo o LGTM) e teste de fumaça pelo Kong: readiness, documentação e login |
 | `tls` | Sobe as dependências com TLS e roda `npm run test:docker:tls`. Depois, `npm run docker:up:tls` e fumaça em `https://localhost:8443`, conferindo que a API recusa conexão sem certificado |
-| `vault` | `npm run docker:up:vault`: aplica o módulo OpenTofu num Vault dev e sobe tudo. Confere a readiness (com o check `vault`), o login e se a API se conectou com o usuário temporário do Mongo. Depois roda `npm run test:docker:vault` |
-| `security` | `npm audit --omit=dev --audit-level=high`; Trivy no repositório (vulnerabilidades e segredos, bloqueante) e em IaC/configuração (Dockerfile, compose, Helm, OpenTofu: relatório na aba *Security*); build da imagem e Trivy nela (bloqueante para altas e críticas com correção) |
-| `iac` | `tofu fmt -check` e `tofu validate` do módulo `infra/vault`; `helm lint` e `helm template` com cada arquivo de `ci/`; `kubeconform` com os schemas do Kubernetes e das CRDs do Kong e do Prometheus Operator |
-| CodeQL (`codeql.yml`) | SAST do TypeScript (consultas `security-extended`) em push, PR e toda segunda; resultados em *Security > Code scanning* |
+| `vault` | `npm run docker:up:vault`: aplica `dev/vault` num Vault dev e sobe tudo. Confere a readiness (com o check `vault`), o login e se a API se conectou com o usuário temporário do Mongo. Depois roda `npm run test:docker:vault` |
+| `security` | `npm audit --omit=dev --audit-level=high`; Trivy no repositório (vulnerabilidades e segredos, bloqueante) e em IaC/configuração (relatório na aba *Security*); build da imagem e Trivy nela (bloqueante para altas e críticas com correção) |
+| `iac` | `tofu fmt -check` e `tofu validate` de `dev/vault`; com o segredo `PLATFORM_REPO_TOKEN` (leitura de `platform-infra`), `helm lint`, `helm template` e `kubeconform` do chart base com `deploy/values.yaml` |
+| CodeQL (`codeql.yml`) | SAST do TypeScript (consultas `security-extended`) em push, PR e toda segunda |
 
-Em caso de falha, o job imprime os logs dos containers. Um push novo na mesma branch cancela a execução anterior. O [Dependabot](.github/dependabot.yml) abre PRs semanais para npm (OpenTelemetry e ESLint agrupados), actions, a imagem do `Dockerfile`, as imagens dos `docker-compose*.yml` e os providers do módulo OpenTofu. A versão maior do InfluxDB é ignorada (veja os pontos de atenção).
+O [Dependabot](.github/dependabot.yml) abre PRs semanais (npm, actions, Docker, `docker-compose*.yml` e providers de `dev/vault`); a versão maior do InfluxDB é ignorada. Na migração para o GitLab, remova `.github/` (Actions, Dependabot e CodeQL), que o `.gitlab-ci.yml` e o Renovate substituem.
 
 ---
 
@@ -1558,9 +1571,10 @@ Sem `.env`, valem os padrões abaixo. Para customizar, copie `.env.example` para
 | `npm run docker:infra` | Sobe só as dependências e o Kong (apontando para a API no host) |
 | `npm run docker:up:tls` / `docker:infra:tls` | Os mesmos, com TLS em tudo (gera certificados e `kong.yml` com upstream `https`) |
 | `npm run dev:docker:tls` / `start:docker:tls` | API no host com `.env.docker` + `.env.tls` |
-| `npm run docker:up:vault` / `docker:infra:vault` | Modo Vault: recria o Vault dev, aplica `infra/vault` com OpenTofu, sobe tudo (ou as dependências) com segredos do Vault |
+| `npm run docker:up:vault` / `docker:infra:vault` | Modo Vault: recria o Vault dev, aplica `dev/vault` com OpenTofu, sobe tudo (ou as dependências) com segredos do Vault |
 | `npm run dev:docker:vault` / `start:docker:vault` | API no host com `.env.docker` + `.env.tls` + `.env.vault` |
-| `npm run vault:bootstrap` | Só aplica o módulo no Vault local que já está de pé |
+| `npm run vault:bootstrap` | Só aplica `dev/vault` no Vault local que já está de pé |
+| `npm run vault:sync-modules` | Copia os módulos do Vault de `../platform-infra` (ou `PLATFORM_INFRA_DIR`) para `dev/vault/modules` |
 | `npm run db:migrate` / `db:migrate:docker` | Cria os índices que faltam no MongoDB (`-- --drop` também remove os obsoletos) |
 | `npm run docker:build` / `docker:logs` / `docker:down` | Build da imagem / logs da API / para os containers (inclusive os do modo Vault) |
 | `npm test` | Testes (os de integração são ignorados sem as variáveis) |
@@ -1585,7 +1599,7 @@ Sem `.env`, valem os padrões abaixo. Para customizar, copie `.env.example` para
 5. **Toda query string passa pela whitelist** (`*.query.schema.ts`). Nunca exponha campos sensíveis (hash de senha, segredos) no `QuerySchema`, nem passe `req.query` direto ao repositório.
 6. **O que sai na resposta é o `toJSON()` do model.** Campos sensíveis devem ser omitidos ali (como `passwordHash` em `User`), e o teste de contrato do OpenAPI acusa campos novos não documentados.
 7. **O RPC no RabbitMQ não tem autenticação de aplicação.** Quem alcança o broker com permissão no vhost lê usuários e jobs. Mantenha o RabbitMQ só na rede interna, com mTLS e usuários por serviço (no modo Vault, temporários e restritos ao vhost), e nunca use `app`/`app-rabbit-local` fora do ambiente local.
-8. **Chaves e segredos:** `keys/`, `certs/`, `.vault/` e `.env` nunca vão para o git. Em produção, os segredos vêm do Vault (módulo `infra/vault`), nunca de variáveis no manifesto. Trocar as chaves dos JWTs muda o `kid`: atualize `kong.jwt.publicKey` e faça o rollout. Sem `JWT_*_KEY_PATH`, a API gera chaves temporárias: aceitável só em desenvolvimento.
+8. **Chaves e segredos:** `keys/`, `certs/`, `.vault/` e `.env` nunca vão para o git. Em produção, os segredos vêm do Vault (módulos de `platform-infra`), nunca de variáveis no manifesto. Trocar as chaves dos JWTs muda o `kid`: atualize `kong.jwt.publicKey` e faça o rollout. Sem `JWT_*_KEY_PATH`, a API gera chaves temporárias: aceitável só em desenvolvimento.
 9. **Segredos na auditoria:** um campo sensível novo (ex.: `apiKey`) deve entrar na lista do `redact.ts`, senão vai para a exchange `audit` em texto puro.
 10. **Clientes web:** guarde o refresh token em cookie `HttpOnly`/`Secure`/`SameSite=Strict`, nunca em `localStorage`. Serialize a renovação: dois refreshes com o mesmo token revogam a sessão.
 11. **Portas locais sem autenticação:** nos modos 2 a 6, Mongo e Redis do compose não têm senha e só escutam em `127.0.0.1`. O modo Vault liga a autenticação (usuários temporários no Mongo, senha no Redis); em produção, use sempre autenticação e rede privada. O mTLS autentica a conexão, mas não substitui usuário e senha. A Admin API do Kong (`:8001`) nunca pode ser exposta.
@@ -1601,7 +1615,7 @@ Sem `.env`, valem os padrões abaixo. Para customizar, copie `.env.example` para
 21. **O Vault vira dependência de inicialização.** Sem ele, pods novos não recebem segredos e não sobem; os que estão de pé continuam, porque o Agent guarda o que já buscou, até as credenciais vencerem (24 h no máximo). Em produção, use o Vault em HA (Raft, 3 ou 5 nós), com *auto-unseal* no KMS e backup dos snapshots, ou um serviço gerenciado.
 22. **O Vault local é descartável (modo dev).** Tudo fica em memória e é recriado a cada `docker:up:vault`, inclusive a CA: os certificados em `certs/` mudam a cada subida. O token `dev-root-token` e as senhas de `envs/local.tfvars` são só locais.
 23. **Estado do OpenTofu tem segredos.** Use estado remoto, com acesso restrito e cifrado (`TF_ENCRYPTION`). Senhas de administração vêm de `TF_VAR_*` no pipeline, e os segredos estáticos de produção vão direto para o Vault (`vault kv put`), nunca em `tfvars`.
-24. **Política mínima:** a política `api-clean-architecture` só lê os próprios caminhos. Segredo novo exige mudar o template do Agent, `vault.secrets` no chart e a política no módulo; sem a política, o Agent recebe 403 e o pod não sobe.
+24. **Política mínima:** a política `api-clean-architecture` só lê os próprios caminhos. Segredo novo exige mudar `vault.files` no `deploy/values.yaml` e a política no módulo; sem a política, o Agent recebe 403 e o pod não sobe.
 
 ### Consistência e dados
 
@@ -1713,9 +1727,9 @@ Exemplo hipotético (**não implementado**): **locais de instalação** (`Locati
 | **Consumir evento de outro serviço** | 1) Caso de uso no service (idempotente pelo `messageId` ou id do recurso) → 2) `{ eventName, exchange, routingKey, handle }` em `presentation/eventbus/subscribers.ts`, chamando o service → 3) teste de integração em `test/integration/rabbitmq.test.ts` |
 | **Oferecer um recurso RPC** | 1) Método no service (reutilize o `QuerySchema` se for consulta) → 2) `{ name: 'recurso.acao', handle }` em `presentation/eventbus/rpc.resources.ts` → 3) teste de integração. Lembre que o RPC não tem autenticação: só exponha o que qualquer serviço interno pode ler |
 | **Nova dependência externa** (ex.: S3, e-mail, outra API) | 1) Porta em `application/port/` → 2) adaptador real e em memória em `infrastructure/` → 3) variável `*_DRIVER` + configuração em `di/env.ts` (com `tlsClientShape` e credenciais em `SECRET_VARS`) e um `di/<area>.ts` → 4) `HealthCheck` (crítica ou não) no container → 5) reconhecer os erros de indisponibilidade em `resilience/unavailable.ts` (→ 503) → 6) conexão com retry/log de queda e retorno, `Reloadable` e fechamento em `container.close` → 7) serviço no `docker-compose.yml` (e nas camadas TLS e Vault), `.env.docker` e job `integration` do CI → 8) credenciais no Vault (módulo + template do Agent) e `config` do chart → 9) testes de integração |
-| **Novo segredo** (ex.: chave de uma API externa) | 1) Nome em `SECRET_VARS` (`di/env.ts`), para aceitar `<VAR>_FILE` → 2) leitura com `currentSecret(env, ...)` no `di/`, se puder mudar sem reiniciar → 3) template em `deploy/helm/.../files/vault/<nome>.ctmpl` e entrada em `vault.secrets` do chart → 4) caminho na política (`infra/vault/policies/api.hcl.tftpl`) → 5) valor local em `static_secrets` (`envs/local.tfvars`) → 6) README do módulo e tabela de variáveis |
+| **Novo segredo** (ex.: chave de uma API externa) | 1) Nome em `SECRET_VARS` (`di/env.ts`), para aceitar `<VAR>_FILE` → 2) leitura com `currentSecret(env, ...)` no `di/`, se puder mudar sem reiniciar → 3) entrada em `vault.files` (caminho e template) e a variável `<VAR>_FILE` em `env`, no `deploy/values.yaml` → 4) se for estático: nome documentado em `platform-infra/vault/projects/matrixgrid.yaml` e valor local em `static_secrets` (`dev/vault/main.tf`); se for de outro motor, o módulo `service` da plataforma (MR na plataforma) → 5) tabela de variáveis |
 | **Conexão que precisa trocar credenciais sem reiniciar** | 1) Método `reconfigure`/`reconnect` no adaptador (lê os arquivos antes de fechar: se falhar, a conexão atual continua) → 2) `Reloadable` com `watchedFiles(...)` no `di/<area>.ts` → 3) registro no `secretWatcher` do container → 4) teste de integração da reconexão |
-| **Novo alerta** | Regra em `observability/grafana/alerting/api.yaml` (seletor `service_name`) e a mesma no `templates/prometheusrule.yaml` do chart (seletor `job`) → painel no dashboard → linha na tabela de [Alertas e SLOs](#alertas-e-slos) |
+| **Novo alerta** | Regra em `observability/grafana/alerting/api.yaml` (seletor `service_name`) e a mesma em `metrics.prometheusRule.extraRules` do `deploy/values.yaml` → painel no dashboard → linha na tabela de [Alertas e SLOs](#alertas-e-slos) |
 | **Nova métrica de negócio** | Instrumento em `infrastructure/telemetry/metrics.ts`, registrado no adaptador (não no domínio) → painel em `observability/grafana/dashboards/api.json` |
 | **Novo papel** | 1) Valor em `USER_ROLES` (`domain/model/user.ts`) → 2) entrada em `ROLE_SCOPES` → 3) revisar as regras de dono nos services → 4) validador de criação de usuário → 5) OpenAPI e testes |
 
@@ -1761,7 +1775,7 @@ Exemplo hipotético (**não implementado**): **locais de instalação** (`Locati
 - **`docker:up:vault` para no `tofu apply`:** o Vault não respondeu ou o estado é de outro Vault. Rode de novo: o script recria o Vault e descarta o estado (`.vault/local.tfstate`).
 - **Agent sem arquivos em `.vault/secrets` (`vault-agent` não fica saudável):** veja `docker compose -f docker-compose.yml -f docker-compose.tls.yml -f docker-compose.vault.yml logs vault-agent`. `permission denied` indica política faltando no módulo; `connection refused` do Mongo indica que ele ainda não criou o administrador (aguarde o healthcheck).
 - **API no modo Vault com `MONGO_USERNAME_FILE: não foi possível ler`:** o Agent ainda não gravou os arquivos, ou eles foram limpos numa nova subida. Use `npm run docker:infra:vault` antes do `dev:docker:vault`.
-- **Kubernetes: pod preso em `Init` (`vault-agent-init`):** o papel `api` do Kubernetes auth não aceita a ServiceAccount/namespace do pod, ou a política não cobre um dos caminhos em `vault.secrets`. Veja os logs do container `vault-agent-init`.
+- **Kubernetes: pod preso em `Init` (`vault-agent-init`):** o papel `matrixgrid-api-clean-architecture` do `auth/k8s-<ambiente>` não aceita a ServiceAccount ou o namespace do pod, ou a política não cobre um dos caminhos de `vault.files`. Veja os logs do container `vault-agent-init` e o `projects/matrixgrid.yaml` da plataforma.
 - **Kubernetes: job `<release>-migrate` falhou:** `kubectl logs job/<release>-migrate -c migrate`. Índice único com dados duplicados precisa de limpeza manual antes.
 - **Kong (KIC) responde 502 para a API:** o Kong não confia na CA da API (`kong.upstream.caSecret`) ou não apresenta certificado (`kong.upstream.clientCertSecret`), e a API exige mTLS.
 - **`Configuração de TLS inválida:`** na inicialização: a lista diz o que está incoerente (ex.: `RABBITMQ_TLS=true exige RABBITMQ_URI com amqps://`).

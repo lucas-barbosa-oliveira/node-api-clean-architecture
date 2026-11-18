@@ -1,5 +1,5 @@
 # Alertas da API provisionados no Grafana do LGTM (Alerting > Alert rules > pasta API).
-# Mesmas regras do PrometheusRule do chart Helm (deploy/helm/api-clean-architecture/templates/prometheusrule.yaml),
+# Mesmas regras do PrometheusRule (SLOs do chart base da plataforma + metrics.prometheusRule.extraRules do deploy/values.yaml),
 # com o seletor service_name (métricas por OTLP) em vez de job (métricas por scrape).
 #
 # SLOs (30 dias): disponibilidade 99,5% (respostas sem 5xx) e latência (95% das requisições abaixo de 500 ms).

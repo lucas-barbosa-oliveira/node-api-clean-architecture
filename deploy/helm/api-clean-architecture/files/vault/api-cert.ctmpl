@@ -1,9 +1,0 @@
-{{- /*
-  Certificado da API (servidor HTTPS e cliente mTLS), emitido pela PKI intermediária. O pkiCert renova sozinho antes
-  de vencer; a chave vai para outro arquivo. A API percebe a troca (SECRETS_RELOAD_INTERVAL_MS) e recarrega.
-  Os @@...@@ são preenchidos pelo chart Helm e pelo scripts/vault.local.ts.
-*/ -}}
-{{- with pkiCert "pki_int/issue/api" "common_name=@@API_CERT_COMMON_NAME@@" "alt_names=@@API_CERT_ALT_NAMES@@" "ip_sans=@@API_CERT_IP_SANS@@" "ttl=@@API_CERT_TTL@@" -}}
-{{ .Key | writeToFile "@@SECRETS_DIR@@/api-key" "" "" "@@KEY_PERMS@@" }}
-{{- .Cert }}{{ .CA }}
-{{- end -}}

@@ -26,6 +26,7 @@
     "db:migrate:docker": "node --env-file=.env.docker src/main/migrate.ts",
     "tls:setup": "node scripts/setup.tls.ts",
     "vault:bootstrap": "node scripts/vault.local.ts bootstrap",
+    "vault:sync-modules": "node scripts/sync.vault.modules.ts",
     "docker:build": "docker compose build api",
     "docker:up": "KONG_UPSTREAM_URL=http://api:3000 KONG_RATE_LIMIT_REDIS_HOST=redis npm run kong:setup && docker compose up -d --build --wait && docker compose up -d --wait --no-deps --force-recreate kong",
     "docker:infra": "KONG_UPSTREAM_URL=http://host.docker.internal:3000 KONG_RATE_LIMIT_REDIS_HOST=redis npm run kong:setup && docker compose up -d --wait mongo redis influxdb rabbitmq lgtm kong && docker compose up -d --wait --no-deps --force-recreate kong",

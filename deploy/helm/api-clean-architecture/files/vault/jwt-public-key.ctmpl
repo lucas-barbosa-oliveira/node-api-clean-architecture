@@ -1,1 +1,0 @@
-{{- with secret "kv/data/api/jwt" }}{{ .Data.data.public_key }}{{ end -}}

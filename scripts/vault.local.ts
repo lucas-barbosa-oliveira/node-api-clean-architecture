@@ -1,17 +1,20 @@
 /**
  * Ambiente local com Vault (docker-compose.yml + .tls.yml + .vault.yml), na mesma configuração que vai para o
- * Kubernetes: o módulo infra/vault aplicado pelo OpenTofu e o Vault Agent entregando arquivos à API.
+ * Kubernetes: os módulos do Vault da plataforma aplicados pelo OpenTofu e o Vault Agent entregando arquivos à API.
  *
  *   node scripts/vault.local.ts up         tudo em containers         (npm run docker:up:vault)
  *   node scripts/vault.local.ts infra      dependências; API no host  (npm run docker:infra:vault + dev:docker:vault)
  *   node scripts/vault.local.ts bootstrap  só aplica o módulo no Vault que já está de pé (npm run vault:bootstrap)
  *
- * O Vault local roda em modo dev (em memória): a cada subida ele é recriado e o módulo, aplicado do zero. Por isso o
- * estado do OpenTofu fica em .vault/ e é descartado junto. Requer: Docker, OpenTofu (tofu) e Node.
+ * O Vault local roda em modo dev (em memória): a cada subida ele é recriado e dev/vault (os mesmos módulos da
+ * plataforma, ambiente "local"), aplicado do zero. O estado do OpenTofu fica em .vault/ e é descartado junto.
+ * Os templates do Vault Agent vêm de deploy/values.yaml (vault.files), a mesma fonte do chart no Kubernetes.
+ * Requer: Docker, OpenTofu (tofu) e Node.
  */
 import { execFileSync, type ExecFileSyncOptions } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { parse } from 'yaml'
 
 const mode = process.argv[2] ?? 'up'
 if (!['up', 'infra', 'bootstrap'].includes(mode)) {
@@ -22,14 +25,9 @@ if (!['up', 'infra', 'bootstrap'].includes(mode)) {
 const ROOT = resolve(import.meta.dirname, '..')
 const VAULT_DIR = join(ROOT, '.vault')
 const SECRETS_DIR = join(VAULT_DIR, 'secrets')
-const TEMPLATES_SOURCE = join(ROOT, 'deploy/helm/api-clean-architecture/files/vault')
+const SERVICE_VALUES = join(ROOT, 'deploy/values.yaml')
 const COMPOSE = ['compose', '-f', 'docker-compose.yml', '-f', 'docker-compose.tls.yml', '-f', 'docker-compose.vault.yml']
 const VAULT_ENV = { VAULT_ADDR: 'http://127.0.0.1:8200', VAULT_TOKEN: 'dev-root-token' }
-// o certificado da API é o último: o healthcheck do Agent espera por ele
-const TEMPLATE_ORDER = [
-    'mongo-username', 'mongo-password', 'rabbitmq-username', 'rabbitmq-password', 'redis-password', 'influx-token',
-    'admin-password', 'jwt-private-key', 'jwt-public-key', 'ca-cert', 'api-cert',
-]
 
 const run = (command: string, args: string[], options: ExecFileSyncOptions = {}) => {
     console.log(`\n[vault] $ ${command} ${args.join(' ')}`)
@@ -104,22 +102,33 @@ function prepareDirectories(): void {
     for (const file of readdirSync(SECRETS_DIR)) rmSync(join(SECRETS_DIR, file), { force: true })
 }
 
-/** Templates do chart com os valores locais, e a configuração do Agent com um bloco template por arquivo. */
+/**
+ * Templates de deploy/values.yaml (vault.files) com os valores locais, e a configuração do Agent com um bloco
+ * template por arquivo. O certificado da API vai por último: o healthcheck do Agent espera por ele.
+ */
 function renderAgentConfig(): void {
+    const service = parse(readFileSync(SERVICE_VALUES, 'utf8')) as {
+        app: { name: string; project: string };
+        vault: { files: Record<string, { path: string; template: string }> };
+    }
     const values: Record<string, string> = {
-        API_CERT_COMMON_NAME: 'api',
-        API_CERT_ALT_NAMES: 'api,localhost,host.docker.internal',
-        API_CERT_IP_SANS: '127.0.0.1',
-        API_CERT_TTL: '24h',
+        VAULT_ENV: 'local',
+        VAULT_ROLE: `${service.app.project}-${service.app.name}`,
+        PROJECT: service.app.project,
+        SERVICE: service.app.name,
         SECRETS_DIR: '/vault/secrets',
         // só no ambiente local: a API no host (ou os testes no CI) pode rodar com outro uid que não o do Agent
         KEY_PERMS: '0644',
+        CERT_COMMON_NAME: 'api',
+        CERT_ALT_NAMES: 'api,localhost,host.docker.internal',
+        CERT_IP_SANS: '127.0.0.1',
+        CERT_TTL: '24h',
     }
+    const names = Object.keys(service.vault.files).sort((a, b) => Number(a === 'api-cert') - Number(b === 'api-cert'))
     const blocks: string[] = []
-    for (const name of TEMPLATE_ORDER) {
-        const source = readFileSync(join(TEMPLATES_SOURCE, `${name}.ctmpl`), 'utf8')
-        const rendered = source.replace(/@@(\w+)@@/g, (match, key: string) => {
-            if (!(key in values)) throw new Error(`Marcador sem valor em ${name}.ctmpl: ${match}`)
+    for (const name of names) {
+        const rendered = service.vault.files[name].template.replace(/@@(\w+)@@/g, (match, key: string) => {
+            if (!(key in values)) throw new Error(`Marcador sem valor em vault.files.${name}: ${match}`)
             return values[key]
         })
         writeFileSync(join(VAULT_DIR, 'templates', `${name}.ctmpl`), rendered)
@@ -140,9 +149,6 @@ function applyModule(): void {
     // estado do Vault anterior (que já não existe): começa do zero
     for (const file of [state, `${state}.backup`]) if (existsSync(file)) rmSync(file)
     const env = { ...VAULT_ENV, TF_DATA_DIR: join(VAULT_DIR, 'tofu'), TF_IN_AUTOMATION: '1' }
-    run('tofu', ['-chdir=infra/vault', 'init', '-input=false'], { env })
-    run('tofu', [
-        '-chdir=infra/vault', 'apply', '-auto-approve', '-input=false', '-lock=false',
-        `-state=${state}`, '-var-file=envs/local.tfvars',
-    ], { env })
+    run('tofu', ['-chdir=dev/vault', 'init', '-input=false'], { env })
+    run('tofu', ['-chdir=dev/vault', 'apply', '-auto-approve', '-input=false', '-lock=false', `-state=${state}`], { env })
 }
