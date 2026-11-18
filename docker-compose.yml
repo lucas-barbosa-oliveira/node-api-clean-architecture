@@ -135,6 +135,9 @@ services:
   api:
     build: .
     image: api-clean-architecture:local
+    # uid de quem sobe o compose: a chave privada dos JWTs (0600) em ./keys pertence a ele. Padrão: 1000 (usuário
+    # "node" da imagem). Com outro uid (ex.: runner do CI): HOST_UID=$(id -u) HOST_GID=$(id -g) npm run docker:up
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     env_file: .env.docker
     environment:
       MONGO_URI: mongodb://mongo:27017/?directConnection=true

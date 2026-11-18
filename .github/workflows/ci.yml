@@ -75,6 +75,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci # o kong:setup usa o pacote yaml
+      # a API no container roda com o uid do runner (1001): lê a chave dos JWTs gerada com permissão 0600
+      - run: echo "HOST_UID=$(id -u)" >> "$GITHUB_ENV" && echo "HOST_GID=$(id -g)" >> "$GITHUB_ENV"
       - name: Build da imagem e subida do ambiente completo
         run: npm run docker:up
       - name: Pronta pelo Kong (readiness, documentação e login)
@@ -105,6 +109,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
+      - run: echo "HOST_UID=$(id -u)" >> "$GITHUB_ENV" && echo "HOST_GID=$(id -g)" >> "$GITHUB_ENV"
       - run: npm run tls:setup
       - run: npm run kong:setup
       - name: Dependências com TLS (mTLS no Mongo, Redis e RabbitMQ)
@@ -140,10 +145,11 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - uses: opentofu/setup-opentofu@v1
+      - uses: opentofu/setup-opentofu@v2
         with:
           tofu_wrapper: false
       - run: npm ci
+      - run: echo "HOST_UID=$(id -u)" >> "$GITHUB_ENV" && echo "HOST_GID=$(id -g)" >> "$GITHUB_ENV"
       - name: Ambiente completo com Vault (módulo infra/vault aplicado pelo OpenTofu)
         run: npm run docker:up:vault
       - name: Pronta pelo Kong; usuário do Mongo criado pelo Vault; MFA pelo Transit
@@ -180,7 +186,7 @@ jobs:
       # bloqueia vulnerabilidades altas e críticas nas dependências de produção
       - run: npm audit --omit=dev --audit-level=high
       - name: Trivy no repositório (vulnerabilidades e segredos)
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scanners: vuln,secret
@@ -189,7 +195,7 @@ jobs:
           exit-code: "1"
           trivyignores: .trivyignore
       - name: Trivy em IaC e configuração (Dockerfile, compose, Helm, OpenTofu) para a aba Security
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           format: sarif
@@ -203,7 +209,7 @@ jobs:
       - name: Build da imagem
         run: docker build -t api-clean-architecture:ci .
       - name: Trivy na imagem (sistema operacional e node_modules)
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: api-clean-architecture:ci
           severity: HIGH,CRITICAL
@@ -217,7 +223,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      - uses: opentofu/setup-opentofu@v1
+      - uses: opentofu/setup-opentofu@v2
         with:
           tofu_wrapper: false
       - name: OpenTofu (formato e validação do módulo do Vault)

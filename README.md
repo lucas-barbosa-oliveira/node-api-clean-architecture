@@ -1733,7 +1733,7 @@ Exemplo hipotético (**não implementado**): **locais de instalação** (`Locati
 - **Kong responde 502:**
   - Com `docker:up`, veja `npm run docker:logs`.
   - Com `docker:infra`, a API não está na porta 3000 do host, ou um firewall (ex.: `ufw`) bloqueia a rede do Docker.
-- **`EACCES` em `keys/jwt.private.pem` no container:** `sudo chown 1000 keys/jwt.private.pem`, ou ajuste `user:` no serviço `api`.
+- **`EACCES` em `keys/jwt.private.pem` no container:** o seu uid não é 1000. Suba com `HOST_UID=$(id -u) HOST_GID=$(id -g) npm run docker:up` (o container da API roda com esse uid).
 - **`kong/kong.yml` virou uma pasta:** o compose subiu sem `kong:setup`. Apague a pasta e use `npm run docker:up`.
 - **`429` no login:** limite de 10 por minuto do Kong; aguarde.
 - **Refresh responde 401 logo após funcionar:** o mesmo refresh token foi usado duas vezes e a sessão foi revogada por reuso. Faça login de novo.
