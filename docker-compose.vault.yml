@@ -33,6 +33,10 @@ services:
     user: "1000:1000"
     environment:
       HOME: /tmp
+      # o entrypoint da imagem (set -e) faz chown e setcap, que falham sem root e derrubam o container;
+      # o Agent não precisa de nenhum dos dois
+      SKIP_CHOWN: "true"
+      SKIP_SETCAP: "true"
     volumes:
       - ./.vault/agent.hcl:/vault/config/agent.hcl:ro
       - ./.vault/templates:/vault/templates:ro

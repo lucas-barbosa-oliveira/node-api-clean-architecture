@@ -35,7 +35,24 @@ const run = (command: string, args: string[], options: ExecFileSyncOptions = {})
     console.log(`\n[vault] $ ${command} ${args.join(' ')}`)
     execFileSync(command, args, { stdio: 'inherit', cwd: ROOT, ...options, env: { ...process.env, ...options.env } })
 }
-const compose = (...args: string[]) => run('docker', [...COMPOSE, ...args])
+/** Em caso de falha, mostra os logs dos serviços envolvidos (no terminal e no passo do CI) antes de sair. */
+const compose = (...args: string[]) => {
+    try {
+        run('docker', [...COMPOSE, ...args])
+    } catch (err) {
+        const services = args.filter(arg => !arg.startsWith('-') && arg !== 'up')
+        if (services.length > 0) {
+            console.error(`\n[vault] falhou; últimas linhas de log de: ${services.join(', ')}`)
+            try {
+                const logs = [...COMPOSE, 'logs', '--no-color', '--tail', '80', ...services]
+                execFileSync('docker', logs, { stdio: 'inherit', cwd: ROOT })
+            } catch {
+                // sem logs: o erro original continua valendo
+            }
+        }
+        throw err
+    }
+}
 
 try {
     execFileSync('tofu', ['version'], { stdio: 'ignore' })
