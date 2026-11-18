@@ -1,5 +1,6 @@
 import type { IUserRepository } from '../../../application/port/user.repository.ts'
 import type { ListQuery, Page } from '../../../application/query/list.query.ts'
+import { ConflictError } from '../../../domain/error/index.ts'
 import type { User } from '../../../domain/model/user.ts'
 import type { IUserModel } from '../../database/schema/index.ts'
 import { UserMapper } from '../../mapper/user.mapper.ts'
@@ -26,6 +27,24 @@ export class InMemoryUserRepository implements IUserRepository {
     }
 
     public async save(user: User): Promise<void> {
+        const existing = [...this.#docs.values()].find(doc => doc.email === user.email && doc._id !== user.id)
+        if (existing) throw new ConflictError('E-mail já cadastrado')
         this.#docs.set(user.id, structuredClone(this.#mapper.modelToModelEntity(user)))
+    }
+
+    // sem await entre a leitura e a escrita: atômico no event loop
+    public async consumeTotpStep(userId: string, step: number): Promise<boolean> {
+        const mfa = this.#docs.get(userId)?.mfa
+        if (!mfa?.enabledAt || (mfa.lastUsedStep !== undefined && mfa.lastUsedStep >= step)) return false
+        mfa.lastUsedStep = step
+        return true
+    }
+
+    public async consumeRecoveryCode(userId: string, codeHash: string): Promise<boolean> {
+        const mfa = this.#docs.get(userId)?.mfa
+        const index = mfa?.recoveryCodeHashes.indexOf(codeHash) ?? -1
+        if (!mfa || index < 0) return false
+        mfa.recoveryCodeHashes.splice(index, 1)
+        return true
     }
 }

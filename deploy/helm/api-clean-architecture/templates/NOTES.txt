@@ -1,0 +1,13 @@
+{{ include "api.fullname" . }} instalada no namespace {{ .Release.Namespace }}.
+
+{{- if .Values.kong.enabled }}
+Acesso pelo Kong: https://{{ .Values.kong.host }}/health/ready
+{{- end }}
+Status:     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "api.fullname" . }}
+Logs:       kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "api.fullname" . }} -c api -f
+{{- if .Values.vault.enabled }}
+Segredos:   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "api.fullname" . }} -c vault-agent
+{{- end }}
+{{- if .Values.migrations.enabled }}
+Migração:   job {{ include "api.fullname" . }}-migrate (removido ao concluir com sucesso)
+{{- end }}

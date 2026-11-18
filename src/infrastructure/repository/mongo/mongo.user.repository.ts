@@ -20,8 +20,29 @@ export class MongoUserRepository extends BaseMongoRepository<User, IUserModel> i
         return this.findPage(query)
     }
 
-    public async save(user: User): Promise<void> {
-        await this.create(user)
+    public save(user: User): Promise<void> {
+        return this.upsert(user)
+    }
+
+    /** O filtro só casa se o passo for posterior ao último aceito: dois usos do mesmo código, só um passa. */
+    public consumeTotpStep(userId: string, step: number): Promise<boolean> {
+        return this.run(async () => {
+            const res = await this.model.updateOne(
+                { _id: userId, 'mfa.enabledAt': { $exists: true }, 'mfa.lastUsedStep': { $not: { $gte: step } } },
+                { $set: { 'mfa.lastUsedStep': step } },
+            )
+            return res.modifiedCount === 1
+        })
+    }
+
+    public consumeRecoveryCode(userId: string, codeHash: string): Promise<boolean> {
+        return this.run(async () => {
+            const res = await this.model.updateOne(
+                { _id: userId, 'mfa.recoveryCodeHashes': codeHash },
+                { $pull: { 'mfa.recoveryCodeHashes': codeHash } },
+            )
+            return res.modifiedCount === 1
+        })
     }
 
     protected mongoDBErrorListener(err: unknown): Error {

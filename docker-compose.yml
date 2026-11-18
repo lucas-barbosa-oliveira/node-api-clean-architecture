@@ -3,6 +3,7 @@
 #   npm run docker:up     tudo em containers; acesso pelo Kong em http://localhost:8000
 #   npm run docker:infra  só as dependências; a API roda no host (npm run dev:docker) e o Kong encaminha para ela
 #   npm run docker:down   para tudo (docker compose down -v também apaga os dados)
+#   npm run docker:up:tls / docker:infra:tls   o mesmo com TLS e mTLS em tudo (camada docker-compose.tls.yml)
 #
 # Os dois modos geram kong/kong.yml antes de subir (scripts/setup.kong.ts), apontando o Kong para o container
 # "api" ou para o host. Por isso o Kong é recriado a cada subida.
@@ -47,7 +48,9 @@ services:
   # Banco de séries temporais para os dados dos sensores (passagens das ESP32).
   # Na primeira subida cria usuário, organização, bucket e o token de administração (valores locais, sem segredo real).
   influxdb:
-    image: influxdb:2.7
+    # versão exata: a tag "latest" do Docker Hub passou a ser o InfluxDB 3 Core, que não executa Flux (usado pela API)
+    # e limita cada consulta a ~72 h de dados. Atualizações só dentro da 2.x (Dependabot ignora a versão maior).
+    image: influxdb:2.7.12
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: admin
@@ -107,6 +110,7 @@ services:
       - lgtm-data:/data
       - ./observability/grafana/dashboards:/otel-lgtm/dashboards/api:ro
       - ./observability/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/api.yaml:ro
+      - ./observability/grafana/alerting/api.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/api.yaml:ro
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/ready"] # criado pelo próprio LGTM quando todos os componentes respondem
       interval: 5s
@@ -162,7 +166,7 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  # API Gateway na frente da API: valida o JWT, aplica rate limit e limite de payload.
+  # API Gateway na frente da API: valida o JWT, aplica rate limit (contado no Redis) e limite de payload.
   # Encaminha para o container "api" (docker:up) ou para a API no host em host.docker.internal:3000 (docker:infra).
   kong:
     image: kong:3.9
@@ -185,6 +189,9 @@ services:
       - "127.0.0.1:8001:8001" # Admin API (somente leitura no modo DB-less); nunca exponha publicamente
     extra_hosts:
       - "host.docker.internal:host-gateway" # modo docker:infra: permite ao container alcançar a API no host (Linux)
+    depends_on:
+      redis:
+        condition: service_healthy # rate limit compartilhado (policy redis) nos modos docker:up e docker:infra
     healthcheck:
       test: ["CMD", "kong", "health"]
       interval: 5s

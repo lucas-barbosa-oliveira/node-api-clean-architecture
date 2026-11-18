@@ -11,6 +11,7 @@ import { JwtTokenService } from '../../src/infrastructure/security/jwt.token.ser
 import { RefreshTokenCodec } from '../../src/infrastructure/security/refresh.token.codec.ts';
 import { ScryptPasswordHasher } from '../../src/infrastructure/security/scrypt.password.hasher.ts';
 import { actorFor } from '../helpers/fixtures.ts';
+import { makeMfa, tokensOf } from '../helpers/mfa.ts';
 
 const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
 
@@ -19,10 +20,11 @@ async function setup() {
   const sessions = new InMemorySessionRepository();
   const hasher = new ScryptPasswordHasher();
   const tokens = new JwtTokenService({ ...keys, issuer: 'i', audience: 'a', expiresInSeconds: 600 });
-  const auth = new AuthService({ users, sessions, hasher, tokens, refreshTokens: new RefreshTokenCodec(), refreshTtlSeconds: 3600 });
+  const { mfa, mfaChallenges } = makeMfa(users, sessions);
+  const auth = new AuthService({ users, sessions, hasher, tokens, refreshTokens: new RefreshTokenCodec(), refreshTtlSeconds: 3600, mfa, mfaChallenges });
   const user = User.create({ name: 'Gestor', email: 'gestor@x.com', role: 'manager', passwordHash: await hasher.hash('senha-gestor') });
   await users.save(user);
-  const login = () => auth.login({ email: 'gestor@x.com', password: 'senha-gestor' }, { userAgent: 'teste', ip: '10.0.0.1' });
+  const login = async () => tokensOf(await auth.login({ email: 'gestor@x.com', password: 'senha-gestor' }, { userAgent: 'teste', ip: '10.0.0.1' }));
   return { auth, users, sessions, user, login };
 }
 

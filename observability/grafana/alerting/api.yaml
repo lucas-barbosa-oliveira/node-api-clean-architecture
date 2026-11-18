@@ -1,0 +1,301 @@
+# Alertas da API provisionados no Grafana do LGTM (Alerting > Alert rules > pasta API).
+# Mesmas regras do PrometheusRule do chart Helm (deploy/helm/api-clean-architecture/templates/prometheusrule.yaml),
+# com o seletor service_name (métricas por OTLP) em vez de job (métricas por scrape).
+#
+# SLOs (30 dias): disponibilidade 99,5% (respostas sem 5xx) e latência (95% das requisições abaixo de 500 ms).
+# Os alertas de SLO usam duas janelas (burn rate, do SRE Workbook): disparam rápido num incidente e não ficam piscando.
+#
+# Para receber notificações, cadastre um contact point (Alerting > Contact points) ou provisione um aqui
+# (contactPoints e policies: https://grafana.com/docs/grafana/latest/alerting/set-up/provision-alerting-resources/).
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: api-slo
+    folder: API
+    interval: 1m
+    rules:
+      - uid: api-slo-error-budget-fast
+        title: "API: orçamento de erros consumido 14x mais rápido (SLO 99,5%)"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: ((sum(rate(http_server_request_duration_seconds_count{service_name="api-clean-architecture",http_response_status_code=~"5.."}[1h])) / sum(rate(http_server_request_duration_seconds_count{service_name="api-clean-architecture"}[1h]))) > 0.0720) and ((sum(rate(http_server_request_duration_seconds_count{service_name="api-clean-architecture",http_response_status_code=~"5.."}[5m])) / sum(rate(http_server_request_duration_seconds_count{service_name="api-clean-architecture"}[5m]))) > 0.0720)
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: critical
+          service: api-clean-architecture
+        annotations:
+          summary: Nesse ritmo, o orçamento de erros de 30 dias acaba em ~2 dias.
+          description: Respostas 5xx acima de 7,2% na última hora e nos últimos 5 minutos. Veja /health/ready (dependência fora do ar responde 503) e os logs de erro no Loki.
+          runbook_url: https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture#alertas-e-slos
+      - uid: api-slo-error-budget-slow
+        title: "API: orçamento de erros consumido 6x mais rápido (SLO 99,5%)"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: ((sum(rate(http_server_request_duration_seconds_count{service_name="api-clean-architecture",http_response_status_code=~"5.."}[6h])) / sum(rate(http_server_request_duration_seconds_count{service_name="api-clean-architecture"}[6h]))) > 0.0300) and ((sum(rate(http_server_request_duration_seconds_count{service_name="api-clean-architecture",http_response_status_code=~"5.."}[30m])) / sum(rate(http_server_request_duration_seconds_count{service_name="api-clean-architecture"}[30m]))) > 0.0300)
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: warning
+          service: api-clean-architecture
+        annotations:
+          summary: "Erros 5xx persistentes: o orçamento de 30 dias acaba em ~5 dias."
+          description: Respostas 5xx acima de 3% nas últimas 6 horas e nos últimos 30 minutos.
+          runbook_url: https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture#alertas-e-slos
+      - uid: api-slo-latency
+        title: "API: mais de 10% das requisições acima de 500 ms (SLO: 95%)"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: ((1 - (sum(rate(http_server_request_duration_seconds_bucket{service_name="api-clean-architecture",le="0.5"}[1h])) / sum(rate(http_server_request_duration_seconds_count{service_name="api-clean-architecture"}[1h])))) > 0.1) and ((1 - (sum(rate(http_server_request_duration_seconds_bucket{service_name="api-clean-architecture",le="0.5"}[5m])) / sum(rate(http_server_request_duration_seconds_count{service_name="api-clean-architecture"}[5m])))) > 0.1)
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+          service: api-clean-architecture
+        annotations:
+          summary: Latência fora do objetivo.
+          description: O SLO de latência é 95% das requisições abaixo de 500 ms. Veja o painel de latência por rota e os traces mais lentos no Tempo.
+          runbook_url: https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture#alertas-e-slos
+  - orgId: 1
+    name: api-operacao
+    folder: API
+    interval: 1m
+    rules:
+      - uid: api-outbox-stuck
+        title: "API: eventos parados no outbox há mais de 5 minutos"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: max(outbox_oldest_pending_age_seconds{service_name="api-clean-architecture"}) > 300
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: critical
+          service: api-clean-architecture
+        annotations:
+          summary: RabbitMQ fora do ar ou evento recusado.
+          description: Os eventos esperam no MongoDB e saem quando o barramento volta. Veja o health check rabbitmq em /health/ready.
+          runbook_url: https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture#alertas-e-slos
+      - uid: api-dead-lettered
+        title: "API: mensagens enviadas para a DLQ"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(increase(eventbus_dead_lettered_total{service_name="api-clean-architecture"}[15m])) > 0
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+          service: api-clean-architecture
+        annotations:
+          summary: Um subscriber falhou em todas as tentativas.
+          description: As mensagens estão na fila <APP_NAME>.dlq, com o motivo no header x-dlq-reason. Corrija a causa e mova de volta (Shovel na interface do RabbitMQ).
+          runbook_url: https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture#alertas-e-slos
+      - uid: api-jobs-failing
+        title: "API: mais de 10% dos jobs falhando"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: (sum(rate(jobs_completed_total{service_name="api-clean-architecture",status="failed"}[30m])) / clamp_min(sum(rate(jobs_completed_total{service_name="api-clean-architecture"}[30m])), 1e-9)) > 0.1
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+          service: api-clean-architecture
+        annotations:
+          summary: Jobs falhando.
+          description: Veja o campo error dos jobs (GET /jobs?status=failed) e os logs com component=jobs.
+          runbook_url: https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture#alertas-e-slos
+      - uid: api-event-loop-lag
+        title: "API: event loop com atraso p99 acima de 200 ms"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: max(nodejs_eventloop_delay_p99_seconds{service_name="api-clean-architecture"}) > 0.2
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+          service: api-clean-architecture
+        annotations:
+          summary: CPU saturada ou operação síncrona longa.
+          description: Veja a utilização do event loop e o uso de CPU; considere escalar (HPA) ou investigar operações bloqueantes.
+          runbook_url: https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture#alertas-e-slos
+      - uid: api-no-telemetry
+        title: "API: sem telemetria há 5 minutos"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: absent_over_time(target_info{service_name="api-clean-architecture"}[5m])
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: critical
+          service: api-clean-architecture
+        annotations:
+          summary: Nenhuma instância enviando métricas.
+          description: A API está fora do ar ou sem conexão com o coletor OTLP.
+          runbook_url: https://github.com/lucas-barbosa-oliveira/node-api-clean-architecture#alertas-e-slos

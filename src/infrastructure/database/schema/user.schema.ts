@@ -8,6 +8,14 @@ export interface IUserModel {
   email: string;
   role: UserRole;
   passwordHash: string;
+  mfa?: {
+    secret?: string;
+    enabledAt?: Date;
+    recoveryCodeHashes: string[];
+    lastUsedStep?: number;
+    pendingSecret?: string;
+    pendingExpiresAt?: Date;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -20,6 +28,17 @@ export const userSchema = new mongoose.Schema<IUserModel>(
         email: { type: String, required: true, unique: true },
         role: { type: String, required: true, enum: USER_ROLES },
         passwordHash: { type: String, required: true },
+        // segredo TOTP cifrado (AES-256-GCM) e hashes dos códigos de recuperação
+        mfa: {
+            type: new mongoose.Schema({
+                secret: { type: String },
+                enabledAt: { type: Date },
+                recoveryCodeHashes: { type: [String], default: [] },
+                lastUsedStep: { type: Number },
+                pendingSecret: { type: String },
+                pendingExpiresAt: { type: Date },
+            }, { _id: false }),
+        },
         createdAt: { type: Date, required: true },
         updatedAt: { type: Date, required: true },
     },

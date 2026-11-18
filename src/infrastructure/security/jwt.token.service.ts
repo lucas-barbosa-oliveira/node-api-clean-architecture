@@ -34,6 +34,9 @@ export class JwtTokenService implements ITokenService {
             scope: actor.scopes.join(' '),
             ...(actor.sessionId && { sid: actor.sessionId }),
             ...(actor.clientId && { cid: actor.clientId }),
+            // RFC 8176: como o usuário se autenticou (outros serviços podem exigir "mfa" em operações sensíveis)
+            ...(actor.amr && { amr: [...actor.amr] }),
+            ...(actor.mfaEnrollmentRequired && { mfa_enrollment_required: true }),
         }
         const accessToken = await new SignJWT(claims)
             .setProtectedHeader({ alg: ALGORITHM, typ: 'JWT', kid: await this.#keyId() })
@@ -55,7 +58,7 @@ export class JwtTokenService implements ITokenService {
         } catch {
             throw new UnauthorizedError('Token inválido ou expirado')
         }
-        const { sub, role, scope, sid, cid } = payload
+        const { sub, role, scope, sid, cid, amr, mfa_enrollment_required: mfaEnrollment } = payload
         if (typeof sub !== 'string' || typeof scope !== 'string' || !PRINCIPAL_ROLES.includes(role as PrincipalRole)) {
             throw new UnauthorizedError('Token inválido ou expirado')
         }
@@ -65,6 +68,8 @@ export class JwtTokenService implements ITokenService {
             scopes: scope.split(' ').filter(Boolean),
             ...(typeof sid === 'string' && { sessionId: sid }),
             ...(typeof cid === 'string' && { clientId: cid }),
+            ...(Array.isArray(amr) && { amr: amr.filter((method): method is string => typeof method === 'string') }),
+            ...(mfaEnrollment === true && { mfaEnrollmentRequired: true }),
         }
     }
 

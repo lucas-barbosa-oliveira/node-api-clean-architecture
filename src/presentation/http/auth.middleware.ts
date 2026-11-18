@@ -25,6 +25,10 @@ export function authGuards(authService: AuthService) {
     const requireScopes = (...required: Scope[]): RequestHandler => (_req, res, next) => {
         const actor = getActor(res)
         const missing = required.filter(scope => !actor.scopes.includes(scope))
+        if (missing.length > 0 && actor.mfaEnrollmentRequired) {
+            throw new ForbiddenError('Seu perfil exige autenticação multifator: ative em POST /auth/mfa/setup e '
+                + 'POST /auth/mfa/enable, depois renove o token em POST /auth/refresh')
+        }
         if (missing.length > 0) throw new ForbiddenError(`Escopo necessário: ${missing.join(' ')}`)
         next()
     }

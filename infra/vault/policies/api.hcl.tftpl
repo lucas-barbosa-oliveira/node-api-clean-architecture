@@ -1,0 +1,47 @@
+# Política da API (gerada por OpenTofu a partir deste template).
+
+# segredos estáticos e chave dos JWTs
+path "${kv}/data/${role}/*" {
+  capabilities = ["read"]
+}
+
+# certificado da API (servidor e cliente), renovado pelo Vault Agent antes de vencer
+path "${pki_int}/issue/${role}" {
+  capabilities = ["update"]
+}
+
+# CA raiz (âncora de confiança gravada em ca.crt)
+path "${pki_root}/cert/ca" {
+  capabilities = ["read"]
+}
+
+# credenciais dinâmicas
+path "${database}/creds/${role}" {
+  capabilities = ["read"]
+}
+
+path "${rabbitmq}/creds/${role}" {
+  capabilities = ["read"]
+}
+
+# MFA: cifrar, decifrar e trocar para a versão nova da chave (rewrap); ler só a versão atual
+path "${transit}/encrypt/${transit_key}" {
+  capabilities = ["update"]
+}
+
+path "${transit}/decrypt/${transit_key}" {
+  capabilities = ["update"]
+}
+
+path "${transit}/rewrap/${transit_key}" {
+  capabilities = ["update"]
+}
+
+path "${transit}/keys/${transit_key}" {
+  capabilities = ["read"]
+}
+
+# renovação das leases (o Agent renova credenciais dinâmicas antes de vencer)
+path "sys/leases/renew" {
+  capabilities = ["update"]
+}

@@ -11,6 +11,8 @@ import { errorHandler } from '../presentation/http/error.handler.ts'
 import { healthRoutes } from '../presentation/http/health.routes.ts'
 import { jobController } from '../presentation/http/job.controller.ts'
 import { jobRoutes } from '../presentation/http/job.routes.ts'
+import { mfaController } from '../presentation/http/mfa.controller.ts'
+import { mfaRoutes } from '../presentation/http/mfa.routes.ts'
 import { passageController } from '../presentation/http/passage.controller.ts'
 import { passageRoutes } from '../presentation/http/passage.routes.ts'
 import { buildOpenApiDocument } from '../presentation/http/openapi/document.ts'
@@ -35,6 +37,7 @@ export function createApp(container: Container) {
     if (container.apiDocs) app.use(docsRoutes(buildOpenApiDocument({ title: container.apiDocs.title, version: APP_VERSION })))
     const guards = authGuards(container.authService)
     app.use(authRoutes(authController(container.authService), guards))
+    app.use(mfaRoutes(mfaController(container.mfaService), guards))
     app.use(userRoutes(userController(container.userService), guards))
     app.use(jobRoutes(jobController(container.jobService), guards))
     app.use(deviceRoutes(deviceController(container.deviceService), guards))

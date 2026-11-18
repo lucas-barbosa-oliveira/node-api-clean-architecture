@@ -10,6 +10,10 @@ const ALWAYS_SECRET = new Set([
     'refresh_token',
     'refreshtoken',
     'secret',
+    // MFA: credencial da segunda etapa do login, códigos de recuperação e a URL do QR code (contém o segredo)
+    'mfa_token',
+    'recovery_codes',
+    'otpauth_url',
     'authorization',
     'cookie',
 ])

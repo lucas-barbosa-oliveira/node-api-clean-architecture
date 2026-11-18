@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { InfluxPassageStore } from '../../src/infrastructure/timeseries/influx.passage.store.ts';
 import type { Passage } from '../../src/domain/model/passage.ts';
 import { listQuery } from '../helpers/fixtures.ts';
+import { envTls, influxToken } from '../helpers/connections.ts';
 
 const config = {
   url: process.env.INFLUX_URL as string,
-  token: process.env.INFLUX_TOKEN as string,
+  token: influxToken(),
   org: process.env.INFLUX_ORG as string,
   bucket: process.env.INFLUX_BUCKET as string,
+  tls: envTls.influx,
 };
 
 // Só roda com um InfluxDB disponível (npm run docker:up && npm run test:docker).

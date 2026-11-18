@@ -10,4 +10,7 @@ export const appMetrics = {
     jobsCompleted: meter.createCounter('jobs.completed', { description: 'Jobs finalizados, por tipo e status' }),
     jobDuration: meter.createHistogram('jobs.duration', { description: 'Duração da execução dos jobs', unit: 's' }),
     passagesWritten: meter.createCounter('passages.written', { description: 'Passagens gravadas na série temporal' }),
+    deadLettered: meter.createCounter('eventbus.dead_lettered', {
+        description: 'Mensagens recebidas que foram para a fila <serviço>.dlq (subscriber falhou ou mensagem inválida)',
+    }),
 }

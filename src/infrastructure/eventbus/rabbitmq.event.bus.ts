@@ -9,8 +9,10 @@ import type {
 } from '../../application/port/event.bus.ts'
 import { EventBusUnavailableError } from '../../application/port/event.bus.ts'
 import { silentLogger, type ILogger } from '../../application/port/logger.ts'
-import { redactUri } from '../resilience/retry.ts'
+import { redactUri, sleep } from '../resilience/retry.ts'
+import { describeTls, readTlsClientOptions, type TlsClientConfig } from '../security/tls.ts'
 import { ManagedConnection } from './managed.connection.ts'
+import { appMetrics } from '../telemetry/metrics.ts'
 import { topicMatches } from './topic.ts'
 
 const DURABLE_EXCHANGE = { durable: true } as const
@@ -30,6 +32,23 @@ export type RabbitMqEventBusOptions = {
     rpcTimeoutMs?: number;
     /** Mensagens entregues e ainda não confirmadas por consumidor (controle de vazão). */
     prefetch?: number;
+    /** TLS das conexões (exige amqps:// na uri). */
+    tls?: TlsClientConfig;
+    /** Substituem os da uri (ex.: usuário dinâmico do Vault). */
+    credentials?: RabbitMqCredentials;
+    /** Tentativas de um subscriber antes de a mensagem ir para a fila <service>.dlq. */
+    subscriberAttempts?: number;
+}
+
+export type RabbitMqCredentials = { username?: string; password?: string }
+
+/** Põe usuário e senha na URI (codificados): amqplib só aceita credenciais nela. */
+export function withCredentials(uri: string, credentials?: RabbitMqCredentials): string {
+    if (!credentials?.username && !credentials?.password) return uri
+    const url = new URL(uri)
+    if (credentials.username) url.username = encodeURIComponent(credentials.username)
+    if (credentials.password) url.password = encodeURIComponent(credentials.password)
+    return url.toString()
 }
 
 type PendingCall = {
@@ -50,7 +69,8 @@ type PendingCall = {
  *  - consume: canal dos subscribers (fila <service>) e canal do servidor RPC (fila <service>.rpc).
  */
 export class RabbitMqEventBus implements IEventBus {
-    #options: Required<Omit<RabbitMqEventBusOptions, 'logger'>>
+    #options: Required<Omit<RabbitMqEventBusOptions, 'logger' | 'tls' | 'credentials'>>
+    #tls?: TlsClientConfig
     #log: ILogger
     #instanceId = randomUUID()
     #publisher: ManagedConnection
@@ -73,12 +93,15 @@ export class RabbitMqEventBus implements IEventBus {
             retryIntervalMs: options.retryIntervalMs ?? 2000,
             rpcTimeoutMs: options.rpcTimeoutMs ?? 5000,
             prefetch: options.prefetch ?? 20,
+            subscriberAttempts: options.subscriberAttempts ?? 3,
         }
+        this.#tls = options.tls
         const common = {
             service: this.#options.service,
-            uri: this.#options.uri,
+            uri: withCredentials(this.#options.uri, options.credentials),
             logger: this.#log,
             retryIntervalMs: this.#options.retryIntervalMs,
+            tls: options.tls && readTlsClientOptions(options.tls),
         }
         this.#publisher = new ManagedConnection({
             ...common,
@@ -101,10 +124,21 @@ export class RabbitMqEventBus implements IEventBus {
         return { publish: this.#publisher.isUp, consume: this.#consumer.isUp }
     }
 
+    /** Credenciais ou certificados renovados: as duas conexões são refeitas com os valores novos. */
+    public async reconfigure(settings: { tls?: TlsClientConfig; credentials?: RabbitMqCredentials }): Promise<void> {
+        const next = {
+            uri: withCredentials(this.#options.uri, settings.credentials),
+            tls: settings.tls && readTlsClientOptions(settings.tls),
+        }
+        this.#tls = settings.tls
+        await this.#publisher.reconfigure(next)
+        await this.#consumer.reconfigure(next)
+    }
+
     public start(): void {
         if (this.#started) return
         this.#started = true
-        this.#log.info(`Conectando ao RabbitMQ em ${redactUri(this.#options.uri)}...`)
+        this.#log.info(`Conectando ao RabbitMQ em ${redactUri(this.#options.uri)}${describeTls(this.#tls)}...`)
         this.#publisher.start()
         this.#consumer.start()
     }
@@ -233,6 +267,8 @@ export class RabbitMqEventBus implements IEventBus {
         subscriptions.on('error', (err: Error) => this.#log.error(`Erro no canal de subscribers: ${err.message}`))
         await subscriptions.prefetch(prefetch)
         await subscriptions.assertQueue(service, SERVICE_QUEUE)
+        // fila separada, sem argumentos especiais: não muda a fila do serviço (compatível com filas já existentes)
+        await subscriptions.assertQueue(this.#dlqName, SERVICE_QUEUE)
         for (const subscription of this.#subscriptions) await this.#bind(subscriptions, subscription)
         await subscriptions.consume(service, message => {
             if (message) void this.#onEvent(subscriptions, message)
@@ -281,8 +317,8 @@ export class RabbitMqEventBus implements IEventBus {
         try {
             event = JSON.parse(message.content.toString()) as IntegrationEvent
         } catch {
-            this.#log.warn(`Mensagem de ${exchange} (${routingKey}) não é JSON: descartada`)
-            channel.nack(message, false, false)
+            this.#log.warn(`Mensagem de ${exchange} (${routingKey}) não é JSON: enviada para ${this.#dlqName}`)
+            this.#deadLetter(channel, message, { reason: 'invalid_json', attempts: 0 })
             return
         }
         const targets = this.#subscriptions.filter(sub =>
@@ -295,14 +331,64 @@ export class RabbitMqEventBus implements IEventBus {
             return
         }
         this.#log.info(`Evento ${event.event_name ?? '(sem nome)'} recebido de ${exchange} (${routingKey})`)
-        try {
-            for (const target of targets) await target.handle(event)
-            channel.ack(message)
-        } catch (err) {
-            // sem requeue: um evento que sempre falha não pode travar a fila (configure uma dead-letter exchange se precisar)
-            this.#log.error(`Subscriber ${event.event_name} falhou; mensagem descartada`, { err })
-            channel.nack(message, false, false)
+        const { subscriberAttempts } = this.#options
+        for (let attempt = 1; attempt <= subscriberAttempts; attempt++) {
+            try {
+                // numa nova tentativa, todos os subscribers rodam de novo: eles precisam ser idempotentes
+                for (const target of targets) await target.handle(event)
+                channel.ack(message)
+                return
+            } catch (err) {
+                if (attempt < subscriberAttempts) {
+                    this.#log.warn(`Subscriber ${event.event_name} falhou (tentativa ${attempt}/${subscriberAttempts}): `
+                        + `${(err as Error).message}`)
+                    await sleep(200 * 2 ** (attempt - 1))
+                    continue
+                }
+                // sem requeue: um evento que sempre falha não pode travar a fila; fica guardado para análise
+                const failure = `Subscriber ${event.event_name} falhou ${attempt} vez(es): enviado para ${this.#dlqName}`
+                this.#log.error(failure, { err })
+                this.#deadLetter(channel, message, {
+                    reason: (err as Error).message ?? String(err),
+                    attempts: attempt,
+                    eventName: event.event_name,
+                })
+            }
         }
+    }
+
+    get #dlqName(): string {
+        return `${this.#options.service}.dlq`
+    }
+
+    /**
+     * Copia a mensagem para <service>.dlq com o motivo e a origem nos headers e confirma a original.
+     * Para reprocessar: mover as mensagens de volta pela interface do RabbitMQ (Shovel) ou republicar.
+     */
+    #deadLetter(
+        channel: Channel,
+        message: ConsumeMessage,
+        info: { reason: string; attempts: number; eventName?: string },
+    ): void {
+        const { exchange, routingKey } = message.fields
+        channel.sendToQueue(this.#dlqName, message.content, {
+            ...message.properties,
+            persistent: true,
+            headers: {
+                ...message.properties.headers,
+                'x-dlq-reason': info.reason.slice(0, 500),
+                'x-dlq-attempts': info.attempts,
+                'x-dlq-exchange': exchange,
+                'x-dlq-routing-key': routingKey,
+                'x-dlq-failed-at': new Date().toISOString(),
+                'x-dlq-service': this.#options.service,
+            },
+        })
+        channel.ack(message)
+        appMetrics.deadLettered.add(1, {
+            event_name: info.eventName ?? 'unknown',
+            reason: info.reason === 'invalid_json' ? 'invalid_json' : 'handler_failed',
+        })
     }
 
     async #onRpcRequest(channel: Channel, message: ConsumeMessage): Promise<void> {

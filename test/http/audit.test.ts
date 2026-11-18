@@ -7,6 +7,7 @@ import { InMemoryEventBus } from '../../src/infrastructure/eventbus/in.memory.ev
 import { registerEventBus } from '../../src/presentation/eventbus/index.ts';
 import { ADMIN, createUser, loginAsAdmin, makeApp } from '../helpers/make.app.ts';
 import { waitUntil } from '../helpers/wait.until.ts';
+import { mongoConnectOptions } from '../helpers/connections.ts';
 
 // barramento em memória mesmo no test:docker: o teste lê os eventos publicados
 describe('Auditoria e RPC pelo barramento', () => {
@@ -32,7 +33,7 @@ describe('Auditoria e RPC pelo barramento', () => {
   after(async () => {
     await ctx.close();
     if (process.env.REPOSITORY_DRIVER === 'mongo') {
-      const connection = await mongoose.createConnection(process.env.MONGO_URI as string, { dbName }).asPromise();
+      const connection = await mongoose.createConnection(process.env.MONGO_URI as string, { dbName, ...mongoConnectOptions() }).asPromise();
       await connection.dropDatabase();
       await connection.close();
     }

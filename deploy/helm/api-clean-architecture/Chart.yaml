@@ -1,0 +1,10 @@
+apiVersion: v2
+name: api-clean-architecture
+description: >-
+  API Node.js (Clean Architecture) com segredos e certificados do Vault (Agent Injector), exposta pelo Kong
+  (Kong Ingress Controller), com migração de índices em job, HPA, PDB, NetworkPolicy e alertas de SLO.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.27.0-0"
+keywords: [api, vault, kong, opentelemetry]

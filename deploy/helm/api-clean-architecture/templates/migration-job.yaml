@@ -1,0 +1,88 @@
+{{- if .Values.migrations.enabled }}
+# Índices do MongoDB antes de cada instalação/atualização (npm run db:migrate): as réplicas sobem com
+# MONGO_AUTO_INDEX=false. Hook do Helm: roda antes dos recursos do release, por isso usa uma ServiceAccount própria
+# (também no papel do Vault: <release>-migrate) e variáveis inline.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "api.fullname" . }}-migrate
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+automountServiceAccountToken: {{ .Values.vault.enabled }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "api.fullname" . }}-migrate
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "api.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+      {{- if .Values.vault.enabled }}
+      annotations:
+        {{- include "api.vaultAnnotations" (dict "root" . "prepopulateOnly" true "only" (list "mongo-username" "mongo-password" "ca-cert" "api-cert")) | nindent 8 }}
+      {{- end }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "api.fullname" . }}-migrate
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: {{ include "api.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "src/main/migrate.ts"{{ if .Values.migrations.dropObsoleteIndexes }}, "--drop"{{ end }}]
+          env:
+            {{- /* só o Mongo: os demais drivers ficam em memória (a migração não os usa) */}}
+            {{- $only := list "mongo-username" "mongo-password" "ca-cert" "api-cert" }}
+            {{- $overrides := dict "TIMESERIES_DRIVER" "memory" "EVENT_BUS_DRIVER" "memory" "QUEUE_DRIVER" "in-process" "ADMIN_EMAIL" "" "OTEL_EXPORTER_OTLP_ENDPOINT" "" }}
+            {{- include "api.env" (dict "root" . "only" $only "overrides" $overrides) | nindent 12 }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          {{- if not .Values.vault.enabled }}
+          volumeMounts:
+            - name: secrets
+              mountPath: {{ include "api.secretsDir" . }}
+              readOnly: true
+          {{- end }}
+      {{- if not .Values.vault.enabled }}
+      volumes:
+        - name: secrets
+          secret:
+            secretName: {{ .Values.secrets.existingSecret }}
+            defaultMode: 0440
+      {{- end }}
+{{- end }}

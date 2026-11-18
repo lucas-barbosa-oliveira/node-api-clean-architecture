@@ -2,6 +2,11 @@
 #   quality      lint, typecheck e testes em memória (rápido, sem Docker)
 #   integration  testes contra MongoDB (replica set), Redis, InfluxDB e RabbitMQ reais
 #   image        build da imagem (Dockerfile) e teste de fumaça do ambiente completo pelo Kong
+#   tls          o mesmo ambiente com TLS em tudo (docker-compose.tls.yml): testes de integração e fumaça em HTTPS
+#   vault        o ambiente com Vault (OpenTofu + Vault Agent): testes de integração e fumaça, como no Kubernetes
+#   security     dependências (npm audit), Trivy no repositório (vulnerabilidades, segredos, IaC) e na imagem
+#   iac          OpenTofu (fmt/validate do módulo infra/vault) e Helm (lint, template, kubeconform)
+# SAST (CodeQL) fica em codeql.yml.
 name: CI
 
 on:
@@ -11,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write # SARIF do Trivy na aba Security
 
 # um push novo na mesma branch cancela a execução anterior
 concurrency:
@@ -84,3 +90,155 @@ jobs:
       - name: Derrubar
         if: always()
         run: docker compose down -v
+
+  tls:
+    name: TLS (integração e fumaça em HTTPS)
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE: docker compose -f docker-compose.yml -f docker-compose.tls.yml
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run tls:setup
+      - run: npm run kong:setup
+      - name: Dependências com TLS (mTLS no Mongo, Redis e RabbitMQ)
+        run: $COMPOSE up -d --wait mongo redis influxdb rabbitmq
+      - run: npm run test:docker:tls
+      - name: Ambiente completo com TLS
+        run: npm run docker:up:tls
+      - name: Pronta pelo Kong em HTTPS; a API recusa quem não tem certificado
+        run: |
+          set -euo pipefail
+          curl -fsS --cacert certs/ca.crt https://localhost:8443/health/ready | tee /dev/stderr | grep -q '"status":"ready"'
+          curl -fsS --cacert certs/ca.crt https://localhost:8443/auth/login -H 'content-type: application/json' \
+            -d '{"email":"admin@exemplo.com","password":"admin-local-123"}' | grep -q access_token
+          # dentro da rede: sem certificado de cliente, a API encerra o handshake
+          ! $COMPOSE exec -T api node -e "require('node:https').get({host:'127.0.0.1',port:3000,path:'/health',rejectUnauthorized:false},r=>process.exit(0)).on('error',()=>process.exit(1))"
+      - name: Logs dos containers (em caso de falha)
+        if: failure()
+        run: $COMPOSE logs --no-color --tail 200
+      - name: Derrubar
+        if: always()
+        run: $COMPOSE down -v
+
+  vault:
+    name: Vault (OpenTofu, Agent, credenciais dinâmicas)
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      COMPOSE: docker compose -f docker-compose.yml -f docker-compose.tls.yml -f docker-compose.vault.yml
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_wrapper: false
+      - run: npm ci
+      - name: Ambiente completo com Vault (módulo infra/vault aplicado pelo OpenTofu)
+        run: npm run docker:up:vault
+      - name: Pronta pelo Kong; usuário do Mongo criado pelo Vault; MFA pelo Transit
+        run: |
+          set -euo pipefail
+          ready=$(curl -fsS --cacert certs/ca.crt https://localhost:8443/health/ready)
+          echo "$ready"
+          echo "$ready" | grep -q '"status":"ready"'
+          echo "$ready" | grep -q '"vault":{"status":"up"'
+          curl -fsS --cacert certs/ca.crt https://localhost:8443/auth/login -H 'content-type: application/json' \
+            -d '{"email":"admin@exemplo.com","password":"admin-local-123"}' | grep -q access_token
+          $COMPOSE logs api | grep -q 'Conectando ao MongoDB .* como "v-'
+          test -s .vault/secrets/api-cert
+      - run: npm run test:docker:vault
+      - name: Logs dos containers (em caso de falha)
+        if: failure()
+        run: $COMPOSE logs --no-color --tail 200
+      - name: Derrubar
+        if: always()
+        run: $COMPOSE down -v
+
+  security:
+    name: Segurança (dependências, Trivy)
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      # bloqueia vulnerabilidades altas e críticas nas dependências de produção
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Trivy no repositório (vulnerabilidades e segredos)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+      - name: Trivy em IaC e configuração (Dockerfile, compose, Helm, OpenTofu) para a aba Security
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: config
+          format: sarif
+          output: trivy-config.sarif
+          exit-code: "0" # informativo: os achados aparecem em Security > Code scanning
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+      - name: Build da imagem
+        run: docker build -t api-clean-architecture:ci .
+      - name: Trivy na imagem (sistema operacional e node_modules)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: api-clean-architecture:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+
+  iac:
+    name: OpenTofu e Helm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_wrapper: false
+      - name: OpenTofu (formato e validação do módulo do Vault)
+        run: |
+          tofu fmt -check -recursive infra
+          tofu -chdir=infra/vault init -backend=false -input=false
+          tofu -chdir=infra/vault validate
+      - uses: azure/setup-helm@v4
+      - name: Helm lint e template
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/api-clean-architecture
+          for values in $chart/ci/*.yaml; do
+            helm lint $chart -f $values
+            helm template api $chart -n api -f $values > "rendered-$(basename $values)"
+          done
+      - name: kubeconform (schemas do Kubernetes e das CRDs do Kong e do Prometheus Operator)
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -strict -summary -kubernetes-version 1.30.0 \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered-*.yaml

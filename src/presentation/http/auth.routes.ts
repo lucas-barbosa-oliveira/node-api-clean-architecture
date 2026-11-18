@@ -8,6 +8,8 @@ export function authRoutes(controller: ReturnType<typeof authController>, { guar
     // públicas
     router.post('/auth/login', controller.login)
     router.post('/auth/refresh', controller.refresh)
+    // segunda etapa do login com MFA: o mfa_token da primeira etapa é a credencial
+    router.post('/auth/mfa/verify', controller.verifyMfa)
     router.get('/.well-known/jwks.json', controller.jwks)
     // sessões do próprio usuário: basta estar autenticado
     router.post('/auth/logout', guard(), controller.logout)

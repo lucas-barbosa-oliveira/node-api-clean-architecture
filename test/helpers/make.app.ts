@@ -18,6 +18,8 @@ export async function makeApp(overrides: Record<string, string> = {}) {
     // a fila acompanha o banco: um worker de outro banco (a API rodando ao lado, ou outro arquivo de teste
     // com banco próprio) não pega jobs que não consegue encontrar
     QUEUE_PREFIX: `bull-${mongoDb}`,
+    // bancos de teste são criados na hora: os índices também (no modo Vault, a API usa npm run db:migrate)
+    MONGO_AUTO_INDEX: 'true',
     ADMIN_EMAIL: ADMIN.email,
     ADMIN_PASSWORD: ADMIN.password,
     ...overrides,

@@ -6,6 +6,7 @@ import { MongoUnitOfWork } from '../../src/infrastructure/database/mongo.unit.of
 import { MongoOutbox } from '../../src/infrastructure/outbox/mongo.outbox.ts';
 import { MongoUserRepository } from '../../src/infrastructure/repository/mongo/mongo.user.repository.ts';
 import { newUser } from '../helpers/fixtures.ts';
+import { envTls, mongoCredentials } from '../helpers/connections.ts';
 
 // Só roda com o MongoDB do compose (replica set): npm run docker:infra && npm run test:docker
 describe('Outbox transacional no MongoDB (requer REPOSITORY_DRIVER=mongo)', { skip: process.env.REPOSITORY_DRIVER !== 'mongo' }, () => {
@@ -17,7 +18,11 @@ describe('Outbox transacional no MongoDB (requer REPOSITORY_DRIVER=mongo)', { sk
   const outboxHas = async (id: string) => (await db.models.OutboxEvent.find({ payload: { $regex: id } }).lean()).length;
 
   before(async () => {
-    db = await connectMongo(process.env.MONGO_URI as string, `${process.env.MONGO_DB ?? 'app'}_outbox_test`, { logger: silentLogger });
+    db = await connectMongo(process.env.MONGO_URI as string, `${process.env.MONGO_DB ?? 'app'}_outbox_test`, {
+      logger: silentLogger,
+      tls: envTls.mongo,
+      credentials: mongoCredentials(),
+    });
     assert.ok(db.supportsTransactions, 'o MongoDB do compose precisa estar como replica set');
     users = new MongoUserRepository(db.models.User);
     outbox = new MongoOutbox(db.models.OutboxEvent);

@@ -1,16 +1,20 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { amqpClient, type IConnection } from 'amqp-client-node';
+import { connect, type GetMessage } from 'amqplib';
 import { EventBusUnavailableError, type IntegrationEvent } from '../../src/application/port/event.bus.ts';
 import { RabbitMqEventBus } from '../../src/infrastructure/eventbus/rabbitmq.event.bus.ts';
+import { readTlsClientOptions } from '../../src/infrastructure/security/tls.ts';
+import { envTls, rabbitUri } from '../helpers/connections.ts';
 import { waitUntil } from '../helpers/wait.until.ts';
 
 // Só roda com um RabbitMQ disponível (npm run docker:infra && npm run test:docker).
 // Dois "microsserviços" no mesmo processo, mais um terceiro usando a amqp-client-node (como os serviços antigos).
 describe('RabbitMQ (requer EVENT_BUS_DRIVER=rabbitmq)', { skip: process.env.EVENT_BUS_DRIVER !== 'rabbitmq' }, () => {
-  const uri = process.env.RABBITMQ_URI as string;
-  const producer = new RabbitMqEventBus({ uri, service: 'it-producer' });
-  const consumer = new RabbitMqEventBus({ uri, service: 'it-consumer' });
+  const uri = rabbitUri();
+  const tls = envTls.rabbitmq;
+  const producer = new RabbitMqEventBus({ uri, service: 'it-producer', tls });
+  const consumer = new RabbitMqEventBus({ uri, service: 'it-consumer', tls, subscriberAttempts: 2 });
   const received: IntegrationEvent[] = [];
   let legacy: IConnection;
 
@@ -20,6 +24,9 @@ describe('RabbitMQ (requer EVENT_BUS_DRIVER=rabbitmq)', { skip: process.env.EVEN
 
   before(async () => {
     consumer.subscribe({ eventName: 'ItemCreatedEvent', exchange: 'it-events', routingKey: 'items.*', handle: async e => { received.push(e); } });
+    consumer.subscribe({ eventName: 'ItemBrokenEvent', exchange: 'it-events', routingKey: 'items.broken', handle: async () => {
+      throw new Error('banco do consumidor fora do ar');
+    } });
     consumer.provideResource({ name: 'items.sum', handle: async (a, b) => Number(a) + Number(b) });
     consumer.provideResource({ name: 'items.fail', handle: async () => { throw new Error('item inexistente'); } });
 
@@ -27,7 +34,9 @@ describe('RabbitMQ (requer EVENT_BUS_DRIVER=rabbitmq)', { skip: process.env.EVEN
     producer.start();
     consumer.start();
     await waitUntil(async () => producer.isConnected && Object.values(consumer.status()).every(Boolean), Boolean, 15_000);
-    legacy = await amqpClient.createConnection(uri, { retries: 1, interval: 500 });
+    const ssl = tls && readTlsClientOptions(tls);
+    const sslOptions = ssl && { ca: ssl.ca ? [ssl.ca as Buffer] : undefined, cert: ssl.cert as Buffer, key: ssl.key as Buffer };
+    legacy = await amqpClient.createConnection(uri, { retries: 1, interval: 500, sslOptions });
   });
   after(async () => {
     await legacy?.close();
@@ -49,6 +58,39 @@ describe('RabbitMQ (requer EVENT_BUS_DRIVER=rabbitmq)', { skip: process.env.EVEN
     const start = Date.now();
     await assert.rejects(producer.executeResource('it-consumer', 'items.nao-existe'), /Recurso RPC indisponível/);
     assert.ok(Date.now() - start < 2000, 'falha imediata, sem esperar o timeout de RPC');
+  });
+
+  test('subscriber que falha em todas as tentativas: a mensagem vai para <serviço>.dlq com o motivo nos headers', async () => {
+    const id = crypto.randomUUID();
+    await producer.publish('it-events', 'items.broken', { event_name: 'ItemBrokenEvent', timestamp: new Date().toISOString(), item: { id } }, { messageId: id });
+    const ssl = tls && readTlsClientOptions(tls);
+    const connection = await connect(uri, { ...ssl });
+    try {
+      const channel = await connection.createChannel();
+      const dead = await waitUntil(async () => {
+        const message = await channel.get('it-consumer.dlq', { noAck: true });
+        return message && message.properties.messageId === id ? message : undefined;
+      }, Boolean, 10_000);
+      const headers = (dead as GetMessage).properties.headers ?? {};
+      assert.equal(headers['x-dlq-reason'], 'banco do consumidor fora do ar');
+      assert.equal(headers['x-dlq-attempts'], 2);
+      assert.equal(headers['x-dlq-routing-key'], 'items.broken');
+      assert.equal(headers['x-dlq-service'], 'it-consumer');
+    } finally {
+      await connection.close();
+    }
+  });
+
+  test('reconfigure refaz as conexões (credenciais/certificados novos) e o publish volta a funcionar', async () => {
+    await producer.reconfigure({ tls });
+    const id = crypto.randomUUID();
+    // enquanto a conexão é refeita, o publish falha como indisponível (no serviço, o evento espera no outbox)
+    await waitUntil(
+      async () => producer.publish('it-events', 'items.created', event(id), { messageId: id }).then(() => true, () => false),
+      Boolean,
+      15_000,
+    );
+    await waitUntil(async () => ids(), list => list.includes(id), 10_000);
   });
 
   describe('compatibilidade com serviços que usam a amqp-client-node', () => {

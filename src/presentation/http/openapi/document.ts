@@ -7,6 +7,7 @@ import { refreshSchema } from '../../../application/service/auth.service.ts'
 import { DEVICE_SCOPES, ROLE_SCOPES, SCOPES, type Scope } from '../../../domain/auth/scopes.ts'
 import { claimDeviceSchema, passageBatchSchema } from '../../../domain/validator/device.validator.ts'
 import { jobPayloadSchemas } from '../../../domain/validator/job.validator.ts'
+import { mfaCodeSchema, mfaVerifySchema, totpCodeSchema } from '../../../domain/validator/mfa.validator.ts'
 import { createUserSchema, loginSchema } from '../../../domain/validator/user.validator.ts'
 import { headers, responses, schemas } from './components.ts'
 import { fromZod, S, type JsonSchema } from './json.schema.ts'
@@ -158,11 +159,97 @@ export function buildOpenApiDocument(info: { title: string; version: string }) {
                 tag: 'Autenticação',
                 summary: 'Login',
                 description: 'Abre uma sessão e devolve o par de tokens. **Na documentação, o token é aplicado automaticamente '
-                    + 'em "Authorize"** para as próximas chamadas. Limite no Kong: 10/min por IP.',
+                    + 'em "Authorize"** para as próximas chamadas. Limite no Kong: 10/min por IP.\n\n'
+                    + '**Com MFA ativo**, a resposta não traz tokens: traz `mfa_required: true` e um `mfa_token`, que vai '
+                    + 'com o código do aplicativo em POST /auth/mfa/verify.',
                 access: 'public',
                 body: { schema: fromZod(loginSchema), example: { email: 'admin@exemplo.com', password: 'admin-local-123' } },
+                ok: {
+                    200: {
+                        description: 'Tokens, ou o desafio de MFA (segunda etapa).',
+                        schema: { oneOf: [S.ref('TokenPair'), S.ref('MfaChallenge')] },
+                    },
+                },
+                errors: ['Unauthorized'],
+            }),
+        },
+        '/auth/mfa/verify': {
+            post: operation({
+                tag: 'Autenticação',
+                summary: 'Login com MFA: segunda etapa',
+                description: 'Troca o mfa_token do login e o código de 6 dígitos do aplicativo (ou um código de recuperação, '
+                    + 'que deixa de valer) pelo par de tokens. Cada mfa_token aceita 5 tentativas e vale por poucos minutos; '
+                    + 'depois, só com novo login. Cada código TOTP vale uma vez. Limite no Kong: 10/min por IP.',
+                access: 'public',
+                body: { schema: fromZod(mfaVerifySchema), example: { mfa_token: '<mfa_token do login>', code: '123456' } },
                 ok: { 200: { description: 'Tokens.', schema: S.ref('TokenPair') } },
                 errors: ['Unauthorized'],
+            }),
+        },
+        '/auth/mfa': {
+            get: operation({
+                tag: 'MFA',
+                summary: 'Situação do MFA do usuário',
+                access: 'authenticated',
+                ok: { 200: { description: 'Situação.', schema: S.ref('MfaStatus') } },
+            }),
+        },
+        '/auth/mfa/setup': {
+            post: operation({
+                tag: 'MFA',
+                summary: 'Configurar o MFA (passo 1)',
+                description: 'Gera o segredo TOTP, ainda inativo. Mostre o `otpauth_url` como QR code e confirme com um '
+                    + 'código em POST /auth/mfa/enable em até 10 minutos. Chamar de novo troca o segredo.',
+                access: 'authenticated',
+                ok: { 200: { description: 'Segredo para o aplicativo.', schema: S.ref('MfaSetup') } },
+                errors: ['Conflict'],
+            }),
+        },
+        '/auth/mfa/enable': {
+            post: operation({
+                tag: 'MFA',
+                summary: 'Ativar o MFA (passo 2)',
+                description: 'Confirma com o código atual do aplicativo e devolve os códigos de recuperação (só agora). '
+                    + 'A sessão atual passa a valer como multifator e as outras sessões do usuário são encerradas. '
+                    + 'Quem estava com o token restrito (papel que exige MFA) renova em POST /auth/refresh.',
+                access: 'authenticated',
+                body: { schema: fromZod(totpCodeSchema), example: { code: '123456' } },
+                ok: { 200: { description: 'MFA ativo.', schema: S.ref('RecoveryCodes') } },
+                errors: ['Conflict'],
+            }),
+        },
+        '/auth/mfa/disable': {
+            post: operation({
+                tag: 'MFA',
+                summary: 'Desativar o MFA',
+                description: 'Exige um código do aplicativo ou de recuperação: o token sozinho não basta.',
+                access: 'authenticated',
+                body: { schema: fromZod(mfaCodeSchema), example: { code: '123456' } },
+                ok: { 204: { description: 'MFA desativado.' } },
+                errors: ['Conflict'],
+            }),
+        },
+        '/auth/mfa/recovery-codes': {
+            post: operation({
+                tag: 'MFA',
+                summary: 'Gerar novos códigos de recuperação',
+                description: 'Os anteriores deixam de valer. Exige o código do aplicativo.',
+                access: 'authenticated',
+                body: { schema: fromZod(totpCodeSchema), example: { code: '123456' } },
+                ok: { 200: { description: 'Códigos novos.', schema: S.ref('RecoveryCodes') } },
+                errors: ['Conflict'],
+            }),
+        },
+        '/users/{id}/mfa': {
+            delete: operation({
+                tag: 'MFA',
+                summary: 'Redefinir o MFA de um usuário',
+                description: 'Para quem perdeu o celular e os códigos de recuperação: desativa o MFA e encerra as sessões '
+                    + 'do usuário, que entra só com a senha e configura de novo.',
+                access: SCOPES.mfaResetAny,
+                parameters: [pathId('id', 'Id do usuário.')],
+                ok: { 204: { description: 'MFA redefinido.' } },
+                errors: ['NotFound', 'Conflict'],
             }),
         },
         '/auth/refresh': {
@@ -455,6 +542,7 @@ export function buildOpenApiDocument(info: { title: string; version: string }) {
         tags: [
             { name: 'Autenticação', description: 'Login, renovação de tokens e chave pública.' },
             { name: 'Sessões', description: 'Logout e revogação de sessões.' },
+            { name: 'MFA', description: 'Autenticação multifator: aplicativo autenticador (TOTP) e códigos de recuperação.' },
             { name: 'Usuários', description: 'Gestores e clientes (cadastrados pelo administrador).' },
             { name: 'Jobs', description: 'Relatórios gerados em segundo plano.' },
             { name: 'Dispositivos', description: 'Pareamento e gestão das ESP32.' },

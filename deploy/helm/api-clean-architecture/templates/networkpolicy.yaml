@@ -1,0 +1,26 @@
+{{- if .Values.networkPolicy.enabled }}
+# Entrada: a porta da API só a partir do Kong; métricas só do monitoramento. As probes vêm do kubelet (no nó), que
+# não passa por NetworkPolicy. A saída fica livre: Mongo, Redis, RabbitMQ, InfluxDB e Vault mudam por ambiente.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "api.fullname" . }}
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "api.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.kongNamespaceSelector | nindent 12 }}
+      ports:
+        - port: {{ .Values.server.port }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 12 }}
+      ports:
+        - port: {{ .Values.server.metricsPort }}
+{{- end }}

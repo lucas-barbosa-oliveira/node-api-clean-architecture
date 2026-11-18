@@ -1,0 +1,14 @@
+# Sem Vault: segredos de um Secret existente (ex.: External Secrets), sem Kong, sem TLS, sem HPA.
+vault:
+  enabled: false
+secrets:
+  existingSecret: api-secrets
+kong:
+  enabled: false
+server:
+  tls:
+    enabled: false
+autoscaling:
+  enabled: false
+migrations:
+  enabled: false

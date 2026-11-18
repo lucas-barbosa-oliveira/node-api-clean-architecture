@@ -18,3 +18,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # imagens do docker-compose*.yml (Mongo, Redis, InfluxDB, RabbitMQ, Kong, Vault, LGTM...)
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # o InfluxDB 3 não executa Flux, usado pela API (src/infrastructure/timeseries): migração planejada, não automática
+      - dependency-name: influxdb
+        update-types: ["version-update:semver-major"]
+  # providers do módulo OpenTofu do Vault (mesmo formato de versão do Terraform)
+  - package-ecosystem: terraform
+    directory: /infra/vault
+    schedule:
+      interval: weekly

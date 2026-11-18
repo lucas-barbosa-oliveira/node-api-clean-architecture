@@ -1,5 +1,5 @@
 import mongoose from 'mongoose'
-import { SESSION_REVOKE_REASONS, type SessionRevokeReason } from '../../../domain/model/session.ts'
+import { AUTH_METHODS, SESSION_REVOKE_REASONS, type AuthMethod, type SessionRevokeReason } from '../../../domain/model/session.ts'
 
 export interface ISessionModel {
   _id: string;
@@ -11,6 +11,7 @@ export interface ISessionModel {
   revokedReason?: SessionRevokeReason;
   userAgent?: string;
   ip?: string;
+  amr?: AuthMethod[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -26,6 +27,7 @@ export const sessionSchema = new mongoose.Schema<ISessionModel>(
         revokedReason: { type: String, enum: SESSION_REVOKE_REASONS },
         userAgent: { type: String },
         ip: { type: String },
+        amr: { type: [{ type: String, enum: AUTH_METHODS }], default: undefined },
         createdAt: { type: Date, required: true },
         updatedAt: { type: Date, required: true },
     },

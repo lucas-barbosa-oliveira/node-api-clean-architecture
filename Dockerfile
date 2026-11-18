@@ -30,8 +30,9 @@ COPY src ./src
 USER node
 EXPOSE 3000 9464
 
+# GET /health em HTTP ou HTTPS (SERVER_TLS), apresentando certificado de cliente quando o servidor exige (mTLS)
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
-    CMD ["node", "-e", "fetch(`http://127.0.0.1:${process.env.PORT}/health`).then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+    CMD ["node", "src/main/healthcheck.ts"]
 
 # sem npm na frente: o SIGTERM do "docker stop" chega direto ao Node, que encerra de forma graciosa (src/main/server.ts)
 CMD ["node", "--import", "./src/main/telemetry.ts", "src/main/server.ts"]

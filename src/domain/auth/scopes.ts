@@ -7,7 +7,7 @@ export type PrincipalRole = (typeof PRINCIPAL_ROLES)[number]
 /**
  * Escopos da API. Ficam dentro do token (claim "scope") e cada rota declara o que exige.
  * O sufixo ":any" libera o acesso a recursos de qualquer usuário (sem ele, só os próprios).
- * Gerenciar as próprias sessões (logout, listar, revogar) não exige escopo: basta estar autenticado.
+ * Gerenciar as próprias sessões (logout, listar, revogar) e o próprio MFA não exige escopo: basta estar autenticado.
  */
 export const SCOPES = {
     usersCreate: 'users:create',
@@ -18,6 +18,8 @@ export const SCOPES = {
     jobsRead: 'jobs:read',
     jobsReadAny: 'jobs:read:any',
     sessionsRevokeAny: 'sessions:revoke:any',
+    /** Redefinir o MFA de outro usuário (ex.: perdeu o celular e os códigos de recuperação). */
+    mfaResetAny: 'mfa:reset:any',
     devicesRead: 'devices:read',
     devicesReadAny: 'devices:read:any',
     devicesManage: 'devices:manage',
@@ -40,6 +42,7 @@ export const ROLE_SCOPES: Record<UserRole, readonly Scope[]> = {
         SCOPES.jobsRead,
         SCOPES.jobsReadAny,
         SCOPES.sessionsRevokeAny,
+        SCOPES.mfaResetAny,
         SCOPES.devicesRead,
         SCOPES.devicesReadAny,
         SCOPES.devicesManage,

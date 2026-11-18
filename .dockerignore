@@ -10,11 +10,17 @@ npm-debug.log*
 .env
 .env.*
 keys
+certs
+.vault
 
 # não usados em produção
 test
 scripts
 kong
+rabbitmq
+observability
+infra
+deploy
 coverage
 dist
 README.md

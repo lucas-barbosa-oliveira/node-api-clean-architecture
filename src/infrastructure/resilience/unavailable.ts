@@ -15,6 +15,8 @@ const UNAVAILABLE_NAMES = new Set([
     // InfluxDB
     'RequestTimedOutError',
     EventBusUnavailableError.name,
+    // Vault (Transit do MFA)
+    'VaultUnavailableError',
 ])
 const UNAVAILABLE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENOTFOUND', 'EPIPE', 'EAI_AGAIN'])
 const UNAVAILABLE_MESSAGES = /Connection is closed|Stream isn't writeable|connect ECONNREFUSED/i

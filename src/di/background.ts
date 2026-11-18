@@ -7,12 +7,15 @@ import { JobService } from '../application/service/job.service.ts'
 import { InProcessScheduler } from '../background/scheduler/in.process.scheduler.ts'
 import type { BackgroundTask, ITaskScheduler } from '../background/task.ts'
 import { InProcessJobQueue } from '../infrastructure/queue/in.process.job.queue.ts'
+import type { Reloadable } from '../infrastructure/secrets/secret.file.watcher.ts'
 import type { Env } from './env.ts'
+import { currentSecret, watchedFiles } from './secrets.ts'
 
 export type Background = {
   jobService: JobService;
   scheduler: ITaskScheduler;
   healthChecks: HealthCheck[];
+  reloadables: Reloadable[];
   /** Recuperação na inicialização (chamar antes de aceitar tráfego). */
   recover(): Promise<void>;
   close(): Promise<void>;
@@ -34,7 +37,13 @@ export async function buildBackground(
         const { BullMqJobQueue } = await import('../infrastructure/queue/bullmq.job.queue.ts')
         const { BullMqScheduler } = await import('../background/scheduler/bullmq.scheduler.ts')
 
-        const redis = new RedisConnections(env.REDIS_URL, deps.logger.child('redis'))
+        const redisEnv = env
+        const credentials = () => {
+            const username = currentSecret(redisEnv, 'REDIS_USERNAME')
+            const password = currentSecret(redisEnv, 'REDIS_PASSWORD')
+            return username || password ? { username, password } : undefined
+        }
+        const redis = new RedisConnections(env.REDIS_URL, deps.logger.child('redis'), env.tls.redis, credentials())
         const queue = new BullMqJobQueue({
             repo: deps.jobRepository,
             handlers: deps.handlers,
@@ -56,6 +65,11 @@ export async function buildBackground(
             jobService,
             scheduler,
             recover: async () => {}, // o BullMQ recupera jobs "stalled" sozinho
+            reloadables: [{
+                name: 'redis',
+                files: watchedFiles(env, ['REDIS_USERNAME', 'REDIS_PASSWORD'], env.tls.redis),
+                reload: async () => redis.reconfigure({ tls: redisEnv.tls.redis, credentials: credentials() }),
+            }],
             healthChecks: [{
                 name: 'redis',
                 critical: true, // sem Redis não há como enfileirar jobs
@@ -82,6 +96,7 @@ export async function buildBackground(
         scheduler,
         recover: () => jobService.recoverStale(),
         healthChecks: [],
+        reloadables: [],
         close: async () => {
             await scheduler.stop()
             await queue.close()

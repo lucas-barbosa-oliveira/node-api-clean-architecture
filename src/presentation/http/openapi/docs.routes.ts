@@ -59,7 +59,7 @@ const page = (title: string) => `<!doctype html>
  *  - a autorização sobrevive ao recarregar a página (persistAuthorization).
  */
 const INIT_SCRIPT = `
-const TOKEN_ROUTES = /\\/(auth\\/login|auth\\/refresh|devices\\/claim)$/
+const TOKEN_ROUTES = /\\/(auth\\/login|auth\\/refresh|auth\\/mfa\\/verify|devices\\/claim)$/
 // as variantes *WithPersistOption gravam no localStorage (persistAuthorization): o token sobrevive ao recarregar
 const authorize = token => window.ui.authActions.authorizeWithPersistOption({
   bearerAuth: { name: 'bearerAuth', schema: { type: 'http', scheme: 'bearer' }, value: token },

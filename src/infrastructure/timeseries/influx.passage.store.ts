@@ -7,12 +7,15 @@ import {
     type QueryApi,
     type WriteApi,
 } from '@influxdata/influxdb-client'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { silentLogger, type ILogger } from '../../application/port/logger.ts'
 import type { IPassageStore } from '../../application/port/passage.store.ts'
 import { timeBounds, type Filter, type ListQuery, type Page } from '../../application/query/list.query.ts'
 import type { TimeWindow } from '../../application/query/time.window.ts'
 import type { DeviceStatusSample, Passage, PassageDirection, PassageWindow } from '../../domain/model/passage.ts'
 import { formatMs, redactUri } from '../resilience/retry.ts'
+import { describeTls, readTlsClientOptions, type TlsClientConfig, type TlsClientOptions } from '../security/tls.ts'
 import { appMetrics } from '../telemetry/metrics.ts'
 import { toFluxPredicate } from './flux.filter.ts'
 
@@ -25,29 +28,50 @@ import { toFluxPredicate } from './flux.filter.ts'
  * Tags são indexadas e têm baixa cardinalidade (número de dispositivos); o eventId fica em field.
  * Um ponto é identificado por medição + tags + tempo: reenviar o mesmo evento sobrescreve (idempotente).
  */
+export type InfluxConfig = { url: string; token: string; org: string; bucket: string; tls?: TlsClientConfig }
+
 export class InfluxPassageStore implements IPassageStore {
     #writeApi: WriteApi
     #queryApi: QueryApi
     #bucket: string
     #monitor: InfluxConnectionMonitor
+    #config: InfluxConfig
+    #log: ILogger
 
-    constructor(
-        config: { url: string; token: string; org: string; bucket: string },
-        logger: ILogger = silentLogger,
-    ) {
-        const client = new InfluxDB({ url: config.url, token: config.token, timeout: 10_000 })
+    constructor(config: InfluxConfig, logger: ILogger = silentLogger) {
+        this.#config = config
+        this.#log = logger
+        this.#bucket = config.bucket
+        const tls = config.tls && readTlsClientOptions(config.tls)
+        ;({ writeApi: this.#writeApi, queryApi: this.#queryApi } = this.#client(config.token, tls))
+        logger.info(`Séries temporais no InfluxDB em ${redactUri(config.url)} (org "${config.org}", `
+            + `bucket "${config.bucket}")${describeTls(config.tls)}`)
+        this.#monitor = new InfluxConnectionMonitor(config.url, logger, { tls })
+    }
+
+    /** Token ou certificados renovados: cria um cliente novo; o anterior termina de gravar o que tinha. */
+    public async reconfigure(settings: { token: string; tls?: TlsClientConfig }): Promise<void> {
+        const tls = settings.tls && readTlsClientOptions(settings.tls)
+        const previous = this.#writeApi
+        ;({ writeApi: this.#writeApi, queryApi: this.#queryApi } = this.#client(settings.token, tls))
+        this.#monitor.setTls(tls)
+        await previous.close().catch(() => {})
+        this.#log.info(`Cliente do InfluxDB refeito com token/certificados novos${describeTls(settings.tls)}`)
+    }
+
+    #client(token: string, tls: TlsClientOptions | undefined): { writeApi: WriteApi; queryApi: QueryApi } {
+        const { url, org, bucket } = this.#config
+        // transportOptions vão direto para o https.request do cliente: CA, certificado de cliente e SNI
+        const client = new InfluxDB({ url, token, timeout: 10_000, transportOptions: tls })
         // sem buffer em segundo plano: cada lote é gravado (flush) antes de responder 202 à ESP32
-        this.#writeApi = client.getWriteApi(config.org, config.bucket, 'ms', {
+        const writeApi = client.getWriteApi(org, bucket, 'ms', {
             maxRetries: 2,
             flushInterval: 0,
             writeFailed: (error, lines, attempt) => {
-                logger.warn(`Falha ao gravar ${lines.length} ponto(s) no InfluxDB (tentativa ${attempt}): ${error.message}`)
+                this.#log.warn(`Falha ao gravar ${lines.length} ponto(s) no InfluxDB (tentativa ${attempt}): ${error.message}`)
             },
         })
-        this.#queryApi = client.getQueryApi(config.org)
-        this.#bucket = config.bucket
-        logger.info(`Séries temporais no InfluxDB em ${redactUri(config.url)} (org "${config.org}", bucket "${config.bucket}")`)
-        this.#monitor = new InfluxConnectionMonitor(config.url, logger)
+        return { writeApi, queryApi: client.getQueryApi(org) }
     }
 
     public async write(passages: Passage[], status?: DeviceStatusSample): Promise<void> {
@@ -154,10 +178,16 @@ export class InfluxConnectionMonitor {
     #stopped = false
     #upIntervalMs: number
     #downIntervalMs: number
+    #tls?: TlsClientOptions
 
-    constructor(url: string, logger: ILogger, options: { upIntervalMs?: number; downIntervalMs?: number } = {}) {
+    constructor(
+        url: string,
+        logger: ILogger,
+        options: { upIntervalMs?: number; downIntervalMs?: number; tls?: TlsClientOptions } = {},
+    ) {
         this.#url = url.replace(/\/+$/, '')
         this.#log = logger
+        this.#tls = options.tls
         this.#upIntervalMs = options.upIntervalMs ?? 15_000
         this.#downIntervalMs = options.downIntervalMs ?? 5000
         void this.#check()
@@ -167,6 +197,10 @@ export class InfluxConnectionMonitor {
         return this.#state === 'up'
     }
 
+    public setTls(tls: TlsClientOptions | undefined): void {
+        this.#tls = tls
+    }
+
     public stop(): void {
         this.#stopped = true
         clearTimeout(this.#timer)
@@ -174,11 +208,9 @@ export class InfluxConnectionMonitor {
 
     async #check(): Promise<void> {
         try {
-            const res = await fetch(`${this.#url}/ping`, { signal: AbortSignal.timeout(3000) })
-            if (!res.ok) throw new Error(`HTTP ${res.status}`)
-            this.#up(res.headers.get('x-influxdb-version'))
+            this.#up(await ping(`${this.#url}/ping`, this.#tls))
         } catch (err) {
-            this.#down(err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err))
+            this.#down(err instanceof Error ? err.message : String(err))
         }
         if (this.#stopped) return
         this.#timer = setTimeout(() => void this.#check(), this.#state === 'up' ? this.#upIntervalMs : this.#downIntervalMs)
@@ -209,4 +241,29 @@ export class InfluxConnectionMonitor {
         }
         this.#state = 'down'
     }
+}
+
+/**
+ * GET /ping com node:http(s) (o fetch global não aceita CA nem certificado de cliente por requisição).
+ * Resolve com a versão do InfluxDB (header X-Influxdb-Version).
+ */
+function ping(url: string, tls: TlsClientOptions | undefined): Promise<string | null> {
+    const request = url.startsWith('https:') ? httpsRequest : httpRequest
+    return new Promise((resolve, reject) => {
+        const req = request(url, { method: 'GET', timeout: 3000, ...tls }, res => {
+            res.resume()
+            const status = res.statusCode ?? 0
+            if (status < 200 || status >= 300) reject(new Error(`HTTP ${status}`))
+            else resolve((res.headers['x-influxdb-version'] as string | undefined) ?? null)
+        })
+        req.on('timeout', () => req.destroy(new Error('sem resposta em 3s')))
+        req.on('error', err => reject(new Error(errorMessage(err))))
+        req.end()
+    })
+}
+
+/** Erros de conexão do Node vêm agregados (IPv4 e IPv6): o primeiro já explica. */
+function errorMessage(err: Error): string {
+    if (err instanceof AggregateError && err.errors[0] instanceof Error) return err.errors[0].message
+    return err.message || (err as { code?: string }).code || err.name
 }

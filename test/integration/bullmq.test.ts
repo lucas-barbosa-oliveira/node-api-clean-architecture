@@ -9,13 +9,14 @@ import { RedisConnections } from '../../src/infrastructure/redis/redis.connectio
 import { InMemoryJobRepository } from '../../src/infrastructure/repository/in-memory/in.memory.job.repository.ts';
 import { InMemoryUserRepository } from '../../src/infrastructure/repository/in-memory/in.memory.user.repository.ts';
 import { actorFor, actorOf, newUser } from '../helpers/fixtures.ts';
+import { envTls, redisCredentials } from '../helpers/connections.ts';
 import { waitUntil } from '../helpers/wait.until.ts';
 
 const redisUrl = process.env.REDIS_URL;
 
 // Estes testes só rodam com um Redis disponível (npm run docker:up && npm run test:docker).
 describe('BullMQ (requer Redis)', { skip: !redisUrl }, () => {
-  const connections = new RedisConnections(redisUrl as string);
+  const connections = new RedisConnections(redisUrl as string, undefined, envTls.redis, redisCredentials());
   const janitor = connections.forQueue();
   const queueNames: string[] = [];
   const newQueueName = (prefix: string) => {

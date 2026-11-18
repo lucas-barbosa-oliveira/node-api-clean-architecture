@@ -6,9 +6,22 @@ node_modules/
 .env.*
 !.env.example
 !.env.docker
+!.env.tls
+!.env.vault
 
 # Chaves dos JWTs (geradas por npm run kong:setup) e configuração do Kong gerada a partir do template
 keys/
+# CA local e certificados TLS (gerados por npm run tls:setup)
+certs/
+# Vault local (segredos entregues pelo Agent, credenciais do AppRole, estado do OpenTofu)
+.vault/
+
+# OpenTofu: providers baixados e estados (o .terraform.lock.hcl é versionado)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!infra/vault/envs/local.tfvars
 kong/kong.yml
 
 # Build e cobertura

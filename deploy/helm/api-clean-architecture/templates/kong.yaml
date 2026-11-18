@@ -1,0 +1,169 @@
+{{- if .Values.kong.enabled }}
+{{- $fullname := include "api.fullname" . -}}
+{{- $k := .Values.kong -}}
+# ---------- plugins comuns a todas as rotas ----------
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-correlation-id
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+plugin: correlation-id
+config:
+  header_name: X-Request-ID
+  generator: uuid
+  echo_downstream: true
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-request-size
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+plugin: request-size-limiting
+config:
+  allowed_payload_size: {{ $k.requestSizeLimitKb }}
+  size_unit: kilobytes
+{{- if $k.opentelemetry.enabled }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-opentelemetry
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+plugin: opentelemetry
+config:
+  traces_endpoint: {{ $k.opentelemetry.tracesEndpoint | quote }}
+  resource_attributes:
+    service.name: kong
+  propagation:
+    default_format: w3c
+{{- end }}
+{{- /* um plugin jwt por validade máxima (24 h para usuários, 1 ano para dispositivos) */}}
+{{- $jwtExpirations := list }}
+{{- range $k.routes }}{{ if .jwtMaxExpiration }}{{ $jwtExpirations = append $jwtExpirations (toString .jwtMaxExpiration) }}{{ end }}{{ end }}
+{{- range $exp := uniq $jwtExpirations }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-jwt-{{ $exp }}
+  labels:
+    {{- include "api.labels" $ | nindent 4 }}
+plugin: jwt
+config:
+  key_claim_name: iss
+  claims_to_verify: [exp]
+  maximum_expiration: {{ $exp }}
+  header_names: [authorization]
+  uri_param_names: []
+  cookie_names: []
+{{- end }}
+{{- /* rate limit de cada rota, contado no Redis (vale para todas as réplicas do Kong) */}}
+{{- range $route := $k.routes }}
+{{- if $route.rateLimit }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-rl-{{ $route.name }}
+  labels:
+    {{- include "api.labels" $ | nindent 4 }}
+plugin: rate-limiting
+config:
+  {{- toYaml $route.rateLimit | nindent 2 }}
+  limit_by: ip
+  policy: {{ $k.rateLimit.policy }}
+  fault_tolerant: true
+  {{- if eq $k.rateLimit.policy "redis" }}
+  redis:
+    host: {{ $k.rateLimit.redis.host | quote }}
+    port: {{ $k.rateLimit.redis.port }}
+    database: {{ $k.rateLimit.redis.database }}
+    ssl: {{ $k.rateLimit.redis.ssl }}
+    ssl_verify: {{ $k.rateLimit.redis.sslVerify }}
+    server_name: {{ $k.rateLimit.redis.serverName | quote }}
+    timeout: 2000
+  {{- end }}
+{{- if and (eq $k.rateLimit.policy "redis") $k.rateLimit.redis.passwordSecret }}
+configPatches:
+  - path: /redis/password
+    valueFrom:
+      secretKeyRef:
+        name: {{ $k.rateLimit.redis.passwordSecret.name }}
+        key: {{ $k.rateLimit.redis.passwordSecret.key }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- /* ---------- rotas: um Ingress por rota (métodos, plugins e prioridade próprios) ---------- */}}
+{{- range $route := $k.routes }}
+{{- $plugins := list (printf "%s-correlation-id" $fullname) (printf "%s-request-size" $fullname) }}
+{{- if $k.opentelemetry.enabled }}{{ $plugins = append $plugins (printf "%s-opentelemetry" $fullname) }}{{ end }}
+{{- if $route.jwtMaxExpiration }}{{ $plugins = append $plugins (printf "%s-jwt-%v" $fullname $route.jwtMaxExpiration) }}{{ end }}
+{{- if $route.rateLimit }}{{ $plugins = append $plugins (printf "%s-rl-%s" $fullname $route.name) }}{{ end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}-{{ $route.name }}
+  labels:
+    {{- include "api.labels" $ | nindent 4 }}
+  annotations:
+    konghq.com/plugins: {{ join "," $plugins | quote }}
+    konghq.com/strip-path: "false"
+    konghq.com/protocols: https
+    konghq.com/https-redirect-status-code: {{ $k.httpsRedirectStatusCode | quote }}
+    {{- with $route.methods }}
+    konghq.com/methods: {{ join "," . | quote }}
+    {{- end }}
+    {{- with $route.regexPriority }}
+    konghq.com/regex-priority: {{ . | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $k.ingressClassName }}
+  tls:
+    - hosts: [{{ $k.host | quote }}]
+      secretName: {{ $k.tls.secretName }}
+  rules:
+    - host: {{ $k.host | quote }}
+      http:
+        paths:
+          {{- range $path := $route.paths }}
+          - path: {{ $path | quote }}
+            pathType: {{ ternary "ImplementationSpecific" "Prefix" (hasPrefix "~" $path) }}
+            backend:
+              service:
+                name: {{ $fullname }}
+                port:
+                  number: {{ $.Values.server.port }}
+          {{- end }}
+{{- end }}
+---
+# Quem emite os tokens é a API; o Kong só valida com a chave pública (credencial do consumer, "key" = emissor)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $fullname }}-jwt-credential
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+    konghq.com/credential: jwt
+type: Opaque
+stringData:
+  key: {{ .Values.config.JWT_ISSUER | quote }}
+  algorithm: RS256
+  rsa_public_key: |
+    {{- $k.jwt.publicKey | trim | nindent 4 }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongConsumer
+metadata:
+  name: {{ $fullname }}-auth
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/ingress.class: {{ $k.ingressClassName }}
+username: {{ $fullname }}-auth
+credentials:
+  - {{ $fullname }}-jwt-credential
+{{- end }}

@@ -1,6 +1,7 @@
 import { connect, type ChannelModel } from 'amqplib'
 import type { ILogger } from '../../application/port/logger.ts'
 import { formatMs, sleep } from '../resilience/retry.ts'
+import type { TlsClientOptions } from '../security/tls.ts'
 
 export type ManagedConnectionOptions = {
     /** Papel da conexão nos logs e no RabbitMQ (aparece como connection_name na interface de administração). */
@@ -10,6 +11,8 @@ export type ManagedConnectionOptions = {
     logger: ILogger;
     retryIntervalMs: number;
     maxRetryIntervalMs?: number;
+    /** CA, certificado de cliente e SNI das conexões amqps:// (com amqp:// são ignorados). */
+    tls?: TlsClientOptions;
     /** Declara canais, exchanges, filas e consumidores. Roda a cada (re)conexão; se falhar, a conexão é refeita. */
     setup(connection: ChannelModel): Promise<void>;
     /** Avisado quando a conexão cai (ex.: para rejeitar chamadas RPC pendentes). */
@@ -21,13 +24,14 @@ export type ManagedConnectionOptions = {
  * maxRetryIntervalMs), registrando cada tentativa com o motivo real (recusa, credenciais, vhost, topologia incompatível).
  */
 export class ManagedConnection {
-    #options: Required<Omit<ManagedConnectionOptions, 'onLost'>> & Pick<ManagedConnectionOptions, 'onLost'>
+    #options: Required<Omit<ManagedConnectionOptions, 'onLost' | 'tls'>> & Pick<ManagedConnectionOptions, 'onLost' | 'tls'>
     #connection?: ChannelModel
     #up = false
     #connectedBefore = false
     #closing = false
     #abort = new AbortController()
     #running = false
+    #reconfiguring = false
 
     constructor(options: ManagedConnectionOptions) {
         this.#options = { maxRetryIntervalMs: 15_000, ...options }
@@ -47,6 +51,18 @@ export class ManagedConnection {
         void this.#connectLoop()
     }
 
+    /**
+     * Troca URI (credenciais) e TLS: a conexão atual é fechada e a próxima tentativa já usa os valores novos.
+     * Enquanto isso, o barramento fica indisponível por instantes (eventos esperam no outbox).
+     */
+    public async reconfigure(settings: { uri: string; tls?: TlsClientOptions }): Promise<void> {
+        this.#options.uri = settings.uri
+        this.#options.tls = settings.tls
+        if (!this.#connection) return // ainda tentando conectar: a próxima tentativa usa os valores novos
+        this.#reconfiguring = true
+        await this.#connection.close().catch(() => {})
+    }
+
     public async close(): Promise<void> {
         this.#closing = true
         this.#abort.abort(new Error('conexão encerrada'))
@@ -60,7 +76,11 @@ export class ManagedConnection {
         for (let attempt = 1; !this.#closing; attempt++) {
             let connection: ChannelModel | undefined
             try {
-                connection = await connect(uri, { timeout: 5000, clientProperties: { connection_name: `${service} (${name})` } })
+                connection = await connect(uri, {
+                    timeout: 5000,
+                    clientProperties: { connection_name: `${service} (${name})` },
+                    ...this.#options.tls,
+                })
                 connection.on('error', (err: Error) => log.error(`Erro na conexão RabbitMQ (${name}): ${err.message}`))
                 connection.once('close', (err?: Error) => this.#lost(connection as ChannelModel, err))
                 await this.#options.setup(connection)
@@ -93,7 +113,12 @@ export class ManagedConnection {
         this.#connection = undefined
         this.#options.onLost?.()
         const cause = err ? `: ${err.message}` : ''
-        this.#options.logger.warn(`Conexão RabbitMQ (${this.#options.name}) perdida${cause}. Tentando reconectar...`)
+        if (this.#reconfiguring) {
+            this.#reconfiguring = false
+            this.#options.logger.info(`Conexão RabbitMQ (${this.#options.name}) refeita com credenciais/certificados novos`)
+        } else {
+            this.#options.logger.warn(`Conexão RabbitMQ (${this.#options.name}) perdida${cause}. Tentando reconectar...`)
+        }
         void this.#connectLoop()
     }
 }

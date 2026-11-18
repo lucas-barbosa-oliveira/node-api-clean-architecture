@@ -1,0 +1,240 @@
+# Valores padrão: pensados para produção (TLS em tudo, segredos do Vault, Kong na frente).
+# Ver README.md deste chart para o contrato com a plataforma (o que precisa existir no cluster).
+
+image:
+  repository: ghcr.io/sua-org/api-clean-architecture
+  tag: "" # padrão: appVersion do chart
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  name: "" # padrão: nome completo do release; precisa estar no papel do Vault (bound_service_account_names)
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# Variáveis NÃO secretas da API (ver .env.example). Segredos vêm em arquivo do Vault Agent (seção vault).
+config:
+  APP_NAME: api-clean-architecture
+  LOG_LEVEL: info
+  LOG_FORMAT: json
+  REPOSITORY_DRIVER: mongo
+  MONGO_URI: mongodb://mongodb.data.svc.cluster.local:27017/?replicaSet=rs0
+  MONGO_DB: app
+  MONGO_TLS: "true"
+  QUEUE_DRIVER: redis
+  REDIS_URL: rediss://redis.data.svc.cluster.local:6379
+  TIMESERIES_DRIVER: influx
+  INFLUX_URL: https://influxdb.data.svc.cluster.local:8086
+  INFLUX_ORG: app
+  INFLUX_BUCKET: sensors
+  EVENT_BUS_DRIVER: rabbitmq
+  RABBITMQ_URI: amqps://rabbitmq.messaging.svc.cluster.local:5671
+  JWT_ISSUER: api-clean-architecture
+  JWT_AUDIENCE: api-clean-architecture
+  ADMIN_EMAIL: "" # com ADMIN_PASSWORD (Vault: kv/api/static admin_password), cria o admin inicial
+  MFA_REQUIRED_ROLES: admin
+  API_DOCS_ENABLED: "true"
+  AUDIT_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "" # ex.: http://otel-collector.observability.svc:4318
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: "0.1"
+  SECRETS_RELOAD_INTERVAL_MS: "30000"
+
+# Variáveis extras (lista no formato do Kubernetes, aceita valueFrom).
+extraEnv: []
+
+server:
+  port: 3000
+  # porta só de /health* em HTTP: as probes do kubelet não apresentam certificado de cliente
+  healthPort: 8081
+  metricsPort: 9464
+  tls:
+    enabled: true
+    # require: só aceita quem tem certificado da CA do Vault (o Kong); none: qualquer cliente TLS
+    clientAuth: require
+    minVersion: TLSv1.2
+
+# Vault Agent Injector: entrega segredos, credenciais dinâmicas e o certificado da API como arquivos em /vault/secrets,
+# renovados sozinhos (a API relê a cada SECRETS_RELOAD_INTERVAL_MS). Requer o injector no cluster e o módulo
+# infra/vault aplicado (papel "api" no Kubernetes auth).
+vault:
+  enabled: true
+  role: api
+  authPath: auth/kubernetes
+  namespace: "" # Vault Enterprise / HCP
+  # arquivos entregues (templates em files/vault); desligue os dos drivers que não usar
+  secrets:
+    mongo-username: database/creds/api
+    mongo-password: database/creds/api
+    rabbitmq-username: rabbitmq/creds/api
+    rabbitmq-password: rabbitmq/creds/api
+    redis-password: kv/data/api/static
+    influx-token: kv/data/api/static
+    admin-password: kv/data/api/static
+    jwt-private-key: kv/data/api/jwt
+    jwt-public-key: kv/data/api/jwt
+    ca-cert: pki/cert/ca
+    api-cert: pki_int/issue/api
+  apiCert:
+    commonName: "" # padrão: <release>.<namespace>.svc
+    altNames: [] # além dos nomes do Service (inclui <svc>.<ns>.<porta>.svc, usado pelo Kong)
+    ttl: 72h
+  # cifra dos segredos do MFA pelo Transit, via proxy do Agent no próprio pod
+  transit: true
+  agent:
+    cpuRequest: 10m
+    memRequest: 32Mi
+    cpuLimit: 100m
+    memLimit: 64Mi
+
+# Sem o Vault: Secret (do Vault Secrets Operator, External Secrets ou criado à mão) com os MESMOS nomes de arquivo,
+# montado em /vault/secrets. Também precisa de MFA_ENCRYPTION_KEY (chave "mfa-encryption-key") se vault.transit=false.
+secrets:
+  existingSecret: ""
+
+migrations:
+  enabled: true
+  # remove índices que saíram dos schemas (npm run db:migrate -- --drop)
+  dropObsoleteIndexes: false
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 192Mi
+  limits:
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+terminationGracePeriodSeconds: 35
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+
+service:
+  type: ClusterIP
+  annotations: {}
+
+# Só o Kong (e o Prometheus, na porta de métricas) alcançam a API.
+networkPolicy:
+  enabled: true
+  kongNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: kong
+  monitoringNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: monitoring
+
+# Kong Ingress Controller (KIC >= 3.4): rotas, JWT, rate limit no Redis, correlation id e traces.
+kong:
+  enabled: true
+  ingressClassName: kong
+  host: api.exemplo.com
+  # certificado público do host (ex.: cert-manager com Let's Encrypt)
+  tls:
+    secretName: api-exemplo-com-tls
+  httpsRedirectStatusCode: 301
+  jwt:
+    # chave pública dos JWTs (vault kv get -field=public_key kv/api/jwt). Obrigatória.
+    publicKey: ""
+  # Kong -> API em HTTPS verificado, apresentando o certificado do Kong (mTLS). Secrets criados pela plataforma
+  # (ex.: cert-manager com emissor Vault, papel "infra" do módulo infra/vault).
+  upstream:
+    tls: true
+    clientCertSecret: kong-upstream-client-cert # Secret TLS (tls.crt/tls.key)
+    caSecret: vault-root-ca # Secret com a CA raiz (ca.crt), rotulado konghq.com/ca-cert: "true"
+  rateLimit:
+    policy: redis # com várias réplicas do Kong, o limite vale para o conjunto
+    redis:
+      host: redis.data.svc.cluster.local
+      port: 6379
+      database: 1
+      ssl: true
+      sslVerify: true
+      serverName: redis.data.svc.cluster.local
+      passwordSecret: # opcional: { name: ..., key: ... }
+  requestSizeLimitKb: 128
+  opentelemetry:
+    enabled: false
+    tracesEndpoint: http://otel-collector.observability.svc:4318/v1/traces
+  # as mesmas rotas de kong/kong.template.yml (ambiente local)
+  routes:
+    - name: health
+      paths: [/health]
+      methods: [GET]
+    - name: jwks
+      paths: [/.well-known/jwks.json]
+      methods: [GET]
+    - name: reference
+      paths: [/reference]
+      methods: [GET]
+      rateLimit: { minute: 120 }
+    - name: auth-login
+      paths: [/auth/login]
+      methods: [POST]
+      rateLimit: { minute: 10, hour: 100 }
+    - name: auth-refresh
+      paths: [/auth/refresh]
+      methods: [POST]
+      rateLimit: { minute: 30 }
+    - name: auth-mfa-verify
+      paths: [/auth/mfa/verify]
+      methods: [POST]
+      rateLimit: { minute: 10, hour: 60 }
+    - name: auth-mfa
+      paths: [/auth/mfa]
+      jwtMaxExpiration: 86400
+      rateLimit: { minute: 20 }
+    - name: devices-claim
+      paths: [/devices/claim]
+      methods: [POST]
+      rateLimit: { minute: 10, hour: 60 }
+    - name: device-telemetry
+      paths: ["~/devices/[^/]+/passages$"]
+      methods: [POST]
+      regexPriority: 10
+      jwtMaxExpiration: 31536000
+      rateLimit: { minute: 120 }
+    - name: protected
+      paths: [/users, /clients, /jobs, /reports, /auth/logout, /auth/sessions, /devices, /passages]
+      jwtMaxExpiration: 86400
+      rateLimit: { minute: 300 }
+
+# Prometheus Operator
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+  # alertas de SLO e operação (mesmas regras de observability/grafana/alerting, com o seletor abaixo)
+  prometheusRule:
+    enabled: false
+    labels: {}
+    selector: "" # padrão: job="<release>"
+    slo:
+      availability: 0.995 # 99,5% das requisições sem 5xx (30 dias)
+      latencySeconds: 0.5 # 95% abaixo de 500 ms
+      latencyTarget: 0.95

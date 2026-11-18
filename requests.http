@@ -181,3 +181,49 @@ Authorization: Bearer {{clienteToken3}}
 DELETE {{host}}/devices/{{deviceId}}
 Authorization: Bearer {{clienteToken3}}
 
+
+### ---------- MFA: aplicativo autenticador (TOTP) e códigos de recuperação ----------
+# Usa o administrador. Depois de ativar, o login dele passa a ter duas etapas.
+
+### Situação do MFA
+GET {{host}}/auth/mfa
+Authorization: Bearer {{adminToken}}
+
+### Passo 1: gera o segredo (ainda inativo). Leia o otpauth_url como QR code no aplicativo, ou digite o secret
+POST {{host}}/auth/mfa/setup
+Authorization: Bearer {{adminToken}}
+
+### Passo 2: confirma com o código atual do aplicativo; a resposta traz os 10 códigos de recuperação (só agora)
+POST {{host}}/auth/mfa/enable
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "code": "123456" }
+
+### Login com MFA, etapa 1: a senha devolve mfa_required e o mfa_token (sem tokens ainda)
+# @name adminMfa
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{ "email": "admin@exemplo.com", "password": "admin-local-123" }
+
+### Login com MFA, etapa 2: o mfa_token e o código do aplicativo (ou um de recuperação) devolvem os tokens
+# @name adminMfaVerify
+POST {{host}}/auth/mfa/verify
+Content-Type: application/json
+
+{ "mfa_token": "{{adminMfa.response.body.mfa_token}}", "code": "123456" }
+
+###
+@adminMfaToken = {{adminMfaVerify.response.body.access_token}}
+
+### Desativar (exige um código do aplicativo ou de recuperação)
+POST {{host}}/auth/mfa/disable
+Authorization: Bearer {{adminMfaToken}}
+Content-Type: application/json
+
+{ "code": "XXXX-XXXX-XXXX-XXXX" }
+
+### Admin redefine o MFA de um usuário que perdeu o celular e os códigos (encerra as sessões dele)
+DELETE {{host}}/users/{{cliente.response.body.id}}/mfa
+Authorization: Bearer {{adminToken}}

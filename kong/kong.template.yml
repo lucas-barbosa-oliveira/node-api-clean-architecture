@@ -64,6 +64,39 @@ services:
               limit_by: ip
               policy: local
 
+      # segunda etapa do login com MFA (pública: o mfa_token é a credencial). Além deste limite, a API aceita
+      # 5 tentativas por mfa_token: adivinhar o código exige refazer o login (que também é limitado)
+      - name: auth-mfa-verify
+        paths: [/auth/mfa/verify]
+        methods: [POST]
+        strip_path: false
+        plugins:
+          - name: rate-limiting
+            config:
+              minute: 10
+              hour: 60
+              limit_by: ip
+              policy: local
+
+      # gerenciamento do próprio MFA: exige JWT e tem limite menor que as demais rotas (os corpos levam códigos)
+      - name: auth-mfa
+        paths: [/auth/mfa]
+        strip_path: false
+        plugins:
+          - name: jwt
+            config:
+              key_claim_name: iss
+              claims_to_verify: [exp]
+              maximum_expiration: 86400
+              header_names: [authorization]
+              uri_param_names: []
+              cookie_names: []
+          - name: rate-limiting
+            config:
+              minute: 20
+              limit_by: ip
+              policy: local
+
       # a ESP32 troca o código de pareamento pelo token do dispositivo (pública; o código é a credencial)
       - name: devices-claim
         paths: [/devices/claim]

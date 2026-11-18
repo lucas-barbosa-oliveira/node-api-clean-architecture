@@ -17,6 +17,7 @@ export class SessionMapper extends BaseMapper<Session, ISessionModel> {
             revokedReason: session.revokedReason,
             userAgent: session.userAgent,
             ip: session.ip,
+            amr: [...session.amr],
             createdAt: session.createdAt,
             updatedAt: session.updatedAt,
         }
@@ -33,6 +34,7 @@ export class SessionMapper extends BaseMapper<Session, ISessionModel> {
             revokedReason: json.revokedReason,
             userAgent: json.userAgent,
             ip: json.ip,
+            amr: json.amr ? [...json.amr] : undefined,
             createdAt: new Date(json.createdAt),
             updatedAt: new Date(json.updatedAt),
         })

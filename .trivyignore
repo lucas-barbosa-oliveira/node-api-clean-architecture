@@ -1,0 +1,2 @@
+# Achados aceitos do Trivy, um por linha (CVE-... ou id da regra), sempre com o motivo e a data de revisão.
+# Ex.: CVE-2024-00000  # sem correção na imagem base; não alcançável (revisar em 2026-12)

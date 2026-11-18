@@ -7,6 +7,7 @@ import request, { type Response } from 'supertest';
 import { parse as parseYaml } from 'yaml';
 import { ADMIN, createUser, login, loginAsAdmin, makeApp, type TestUser } from '../helpers/make.app.ts';
 import { waitForJob } from '../helpers/wait.for.job.ts';
+import { Totp } from '../../src/infrastructure/security/totp.ts';
 
 type Doc = { paths: Record<string, Record<string, { responses: Record<string, any> }>>; components: Record<string, any> };
 
@@ -136,6 +137,38 @@ describe('Documentação OpenAPI', () => {
       const single = await login(ctx.app, manager.email, manager.password);
       validateAgainst(await as(single).post('/auth/logout'), 'post', '/auth/logout');
       manager.token = await login(ctx.app, manager.email, manager.password);
+    });
+
+    test('MFA: configuração, login em duas etapas, desativação e redefinição', async () => {
+      const totp = new Totp();
+      const user = await createUser(ctx.app, admin, 'client');
+      validateAgainst(await as(user.token).get('/auth/mfa'), 'get', '/auth/mfa');
+
+      const setupRes = await as(user.token).post('/auth/mfa/setup');
+      validateAgainst(setupRes, 'post', '/auth/mfa/setup');
+      validateAgainst(await as(user.token).post('/auth/mfa/enable').send({ code: '000000' }), 'post', '/auth/mfa/enable');
+      const enabled = await as(user.token).post('/auth/mfa/enable').send({ code: totp.codeAt(setupRes.body.secret) });
+      validateAgainst(enabled, 'post', '/auth/mfa/enable');
+      validateAgainst(await as(user.token).post('/auth/mfa/setup'), 'post', '/auth/mfa/setup'); // 409
+
+      const challenge = await request(ctx.app).post('/auth/login').send({ email: user.email, password: user.password });
+      validateAgainst(challenge, 'post', '/auth/login');
+      const verify = (code: string) => request(ctx.app).post('/auth/mfa/verify').send({ mfa_token: challenge.body.mfa_token, code });
+      validateAgainst(await verify('000000'), 'post', '/auth/mfa/verify');
+      validateAgainst(await request(ctx.app).post('/auth/mfa/verify').send({}), 'post', '/auth/mfa/verify');
+      const tokens = await verify(totp.codeAt(setupRes.body.secret, new Date(Date.now() + 30_000)));
+      validateAgainst(tokens, 'post', '/auth/mfa/verify');
+
+      const mfaToken = tokens.body.access_token;
+      validateAgainst(await as(mfaToken).post('/auth/mfa/recovery-codes').send({ code: '000000' }), 'post', '/auth/mfa/recovery-codes');
+      validateAgainst(await as(mfaToken).post('/auth/mfa/disable').send({ code: enabled.body.recovery_codes[0] }), 'post', '/auth/mfa/disable');
+      validateAgainst(await as(mfaToken).post('/auth/mfa/disable').send({ code: enabled.body.recovery_codes[1] }), 'post', '/auth/mfa/disable');
+
+      validateAgainst(await as(admin).delete(`/users/${user.id}/mfa`), 'delete', '/users/{id}/mfa'); // 409: sem MFA
+      validateAgainst(await as(admin).delete(`/users/${crypto.randomUUID()}/mfa`), 'delete', '/users/{id}/mfa');
+      validateAgainst(await as(mfaToken).delete(`/users/${user.id}/mfa`), 'delete', '/users/{id}/mfa'); // 403
+      await as(mfaToken).post('/auth/mfa/setup').expect(200);
+      validateAgainst(await as(admin).delete(`/users/${user.id}/mfa`), 'delete', '/users/{id}/mfa');
     });
 
     test('usuários', async () => {

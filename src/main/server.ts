@@ -3,12 +3,14 @@ import { loadEnv } from '../di/env.ts'
 import { buildLogger } from '../di/logger.ts'
 import { registerEventBus } from '../presentation/eventbus/index.ts'
 import { createApp } from './app.ts'
+import express from 'express'
+import { healthRoutes } from '../presentation/http/health.routes.ts'
+import { startHealthServer, startHttpServer } from './http.server.ts'
 import { shutdownTelemetry } from './telemetry.ts'
 
 const env = loadEnv()
 const logger = buildLogger(env)
 const log = logger.child('app')
-const port = Number(process.env.PORT ?? 3000)
 
 log.info(
     `Iniciando ${env.APP_NAME} (repositórios: ${env.REPOSITORY_DRIVER}, fila: ${env.QUEUE_DRIVER}, `
@@ -49,9 +51,30 @@ await container.ensureAdmin()
 registerEventBus(container.eventBus, { userService: container.userService, jobService: container.jobService })
 container.eventBus.start()
 
-const server = createApp(container).listen(port, () => {
-    log.info(`Servidor HTTP ouvindo na porta ${port}`)
-})
+const { server, reloadTls } = startHttpServer(createApp(container), { port: env.PORT, tls: env.tls.server, logger: log })
+if (reloadTls) {
+    // certificado renovado em disco (cert-manager, certbot...): kill -HUP <pid> troca sem derrubar conexões
+    process.on('SIGHUP', () => {
+        try {
+            reloadTls()
+        } catch (err) {
+            log.error('Falha ao recarregar o certificado TLS: o anterior continua em uso', { err })
+        }
+    })
+    // certificado renovado em disco pelo Vault Agent ou cert-manager: recarrega sozinho, sem sinal
+    const tls = env.tls.server
+    if (tls) {
+        container.secretWatcher.add({
+            name: 'servidor HTTPS',
+            files: [tls.certFile, tls.keyFile, ...(tls.caFile ? [tls.caFile] : [])],
+            reload: async () => reloadTls(),
+        })
+    }
+}
+await container.secretWatcher.start(env.SECRETS_RELOAD_INTERVAL_MS)
+const healthServer = env.HEALTH_PORT
+    ? startHealthServer(express().use(healthRoutes(container.health)), { port: env.HEALTH_PORT, logger: log })
+    : undefined
 await container.scheduler.start() // tasks de startup e agendadas
 
 container.outboxRelay.start()
@@ -63,7 +86,8 @@ lifecycle.stop = async () => {
         server.close(() => resolve())
         server.closeIdleConnections()
     })
-    log.info('Servidor HTTP encerrado')
+    log.info(`Servidor ${env.tls.server ? 'HTTPS' : 'HTTP'} encerrado`)
+    healthServer?.close()
     await container.close()
     await shutdownTelemetry() // envia os últimos spans
 }
