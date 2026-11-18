@@ -40,8 +40,10 @@ variable "mongodb" {
     connection_url = string # mongodb://{{username}}:{{password}}@host:27017/admin?tls=true
     username       = string
     tls_ca         = optional(string)
-    tls_cert_key   = optional(string) # certificado + chave do Vault como cliente (mTLS)
-    # o próprio módulo emite o certificado de cliente do Vault pela PKI do ambiente (papel infra), com este nome
+    # Certificado de cliente do Vault (mTLS). ATENÇÃO: com ele, o plugin do Vault autentica por X.509 (não por
+    # usuário e senha): exige no Mongo um usuário em $external com o subject do certificado (ex.: CN=vault,O=<org>).
+    tls_cert_key = optional(string)
+    # o próprio módulo emite esse certificado pela PKI do ambiente (papel infra), com este nome (mesma regra do X.509)
     issue_vault_client_cert = optional(string)
   })
   default = null

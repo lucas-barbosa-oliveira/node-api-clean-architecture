@@ -943,7 +943,7 @@ Os marcadores (`@@VAULT_ENV@@`, `@@VAULT_ROLE@@`, `@@SECRETS_DIR@@`, nomes e val
    - os certificados dos serviços em `certs/`, com os mesmos nomes do `tls:setup`;
    - o AppRole do Agent em `.vault/approle`;
    - a chave pública dos JWTs.
-4. Recria Mongo (com autenticação e keyfile, volume `mongo-vault-data`), Redis (com senha), RabbitMQ e InfluxDB com os certificados novos. O healthcheck do Mongo cria o administrador que o Vault usa.
+4. Recria Mongo (com autenticação e keyfile, volume `mongo-vault-data`), Redis (com senha), RabbitMQ e InfluxDB com os certificados novos. O healthcheck do Mongo cria o administrador que o Vault usa. Neste modo o Mongo aceita TLS sem certificado de cliente: o Vault autentica com usuário e senha (com certificado de cliente, o plugin do Vault usaria X.509), e a API continua apresentando o dela.
 5. Sobe o `vault-agent` (AppRole `approle-local`), que grava `.vault/secrets/*`.
 6. Roda a migração de índices (`src/main/migrate.ts`), como o job do deploy.
 7. Gera o `kong.yml` (upstream HTTPS, chave pública do Vault) e sobe LGTM, API e Kong.

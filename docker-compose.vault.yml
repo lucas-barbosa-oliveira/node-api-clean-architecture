@@ -78,6 +78,9 @@ services:
       - /certs/mongo.pem
       - --tlsCAFile
       - /certs/ca.crt
+      # o Vault cria os usuários temporários com usuário e senha (com certificado de cliente, o plugin usaria X.509);
+      # a API continua apresentando o certificado dela
+      - --tlsAllowConnectionsWithoutCertificates
     volumes:
       - mongo-vault-data:/data/db
       - ./infra/local/mongo/healthcheck.js:/scripts/healthcheck.js:ro

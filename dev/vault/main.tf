@@ -33,7 +33,7 @@ module "environment" {
   approle        = true
   pki = {
     organization    = "matrixgrid"
-    infra_domains   = concat(local.infra_svc, ["vault", "localhost"])
+    infra_domains   = concat(local.infra_svc, ["localhost"])
     allow_ip_sans   = true
     allow_localhost = true
     leaf_ttl        = "24h"
@@ -43,8 +43,7 @@ module "environment" {
     connection_url = "mongodb://{{username}}:{{password}}@mongo:27017/admin?directConnection=true&tls=true"
     username       = "vault-admin"
     tls_ca         = module.root_pki.certificate
-    # o Mongo exige certificado de cliente (mTLS): o módulo emite o do Vault
-    issue_vault_client_cert = "vault"
+    # TLS verificando a CA, com usuário e senha (sem certificado de cliente: com ele, o plugin usaria X.509)
   }
   mongodb_password = "vault-admin-local"
   # administração em HTTP só na rede interna do compose (rabbitmq/30-vault.conf)
