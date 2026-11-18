@@ -969,7 +969,7 @@ Este repositório **não tem chart próprio**. A implantação é dividida entre
 | **`platform-infra`** | o chart base `charts/microservice` (publicado como OCI), os módulos do Vault e a declaração do serviço em `vault/projects/matrixgrid.yaml` |
 | **`matrixgrid-gitops`** | `apps/api-clean-architecture/`: os values de cada ambiente (digest da imagem, host, réplicas, chave pública dos JWTs) e a revisão deste repositório em uso |
 
-O Argo CD (cluster de governança) monta cada ambiente com essas três fontes: chart base + `deploy/values.yaml` (na revisão promovida) + values do ambiente.
+O Argo CD (hoje no cluster de dev; na arquitetura-alvo, no de governança) monta cada ambiente com essas três fontes: chart base + `deploy/values.yaml` (na revisão promovida) + values do ambiente.
 
 **O que o chart base cria para o serviço:**
 
@@ -989,6 +989,26 @@ O Argo CD (cluster de governança) monta cada ambiente com essas três fontes: c
 2. `develop`: imagem construída **uma vez** (Buildah, Trivy, SBOM, cosign) e promovida para **dev** (commit no GitOps).
 3. `release/*`: nova imagem promovida para **homologação** (MR no GitOps).
 4. Tag `vX.Y.Z` em `main`: MR copiando o digest de homologação para **produção**, com aprovação (`CODEOWNERS`) e sync manual no Argo CD.
+
+**Enquanto o código está no GitHub** (sem GitLab), a imagem e a promoção são manuais: `docker build`/`docker push` para o GHCR, digest em `apps/api-clean-architecture/envs/<ambiente>/values.yaml` e o commit em `serviceRevision` do `config.yaml` no `matrixgrid-gitops`. Passo a passo: `docs/bootstrap.md` (passo 9) do `platform-infra`.
+
+**Onde roda:**
+
+| Ambiente | Cluster no Argo CD | Cluster na plataforma | Vault |
+|---|---|---|---|
+| dev | `dev` | `tofu/2-clusters/clusters/dev.yaml` | não produção (`dev/...`) |
+| hml | `hml` | `homolog.yaml` | não produção (`hml/...`) |
+| prd | `prd` | `production.yaml` | produção (`prd/...`) |
+
+Os nós de cada cluster (quantidade, CPU, memória, disco) são da plataforma (`platform-infra/docs/clusters.md`) e mudam sem mexer neste repositório: o PDB (`minAvailable: 1`) e o espalhamento entre nós do chart mantêm a API no ar durante as drenagens. Para fixar a API em nós específicos (ex.: workers maiores com rótulo), use `nodeSelector`/`tolerations` nos values do ambiente, no GitOps.
+
+**Primeira implantação num ambiente** (uma vez, pela plataforma; detalhes em `platform-infra/docs/bootstrap.md`):
+
+1. Serviço declarado em `platform-infra/vault/projects/matrixgrid.yaml` e `vault/live` aplicado (papel `matrixgrid-api-clean-architecture`, usuário do Mongo e do RabbitMQ, certificado, Transit, chaves dos JWTs).
+2. Segredos estáticos no Vault: `vault kv put <env>/kv/matrixgrid/api-clean-architecture/static influx_token=... admin_password=... redis_password=...`.
+3. `kong.jwt.publicKey` do ambiente no GitOps (saída `jwt_public_keys` do Vault).
+4. Secrets do mTLS do Kong no namespace `matrixgrid` (`kong-upstream-client-cert` e `vault-root-ca`; comandos no README do chart base).
+5. Imagem promovida (digest) no GitOps: o Argo CD roda o job de migração e sobe a API.
 
 ---
 
